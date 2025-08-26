@@ -1,0 +1,19 @@
+import pandas as pd
+import numpy as np
+
+# Sample DataFrame df with column TIME_TO_PURCHASE that may have numbers or nulls
+
+def bucket_conversion_time(x):
+    if pd.isnull(x) or x > 30:
+        return 'more than 30 days'
+    elif x <= 3:
+        return 'within 3 days'
+    elif 4 <= x <= 7:
+        return 'within 4 to 7 days'
+    elif 8 <= x <= 15:
+        return 'within 8 to 15 days'
+    elif 16 <= x <= 30:
+        return 'within 16 to 30 days'
+
+# Apply the function to create new column
+df['Conversion_time_bucket'] = df['TIME_TO_PURCHASE'].apply(bucket_conversion_time)
