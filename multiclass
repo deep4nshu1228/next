@@ -1,0 +1,60 @@
+import pandas as pd
+from sklearn.model_selection import train_test_split
+from sklearn.pipeline import Pipeline
+from sklearn.compose import ColumnTransformer
+from sklearn.preprocessing import OneHotEncoder, StandardScaler
+from xgboost import XGBClassifier
+from sklearn.metrics import classification_report
+
+# Assume you have your dataframe df with:
+# - Features (mix of numeric and categorical)
+# - Target column 'Conversion_time_bucket' (multiclass labels)
+
+# Split into training and testing with stratification on the multiclass target
+traindf, testdf = train_test_split(df, test_size=0.2, stratify=df['Conversion_time_bucket'], random_state=42)
+
+# Separate features and target
+X_train = traindf.drop(columns=['converted', 'Conversion_time_bucket'])  # Drop other targets as well
+y_train = traindf['Conversion_time_bucket']
+
+X_test = testdf.drop(columns=['converted', 'Conversion_time_bucket'])
+y_test = testdf['Conversion_time_bucket']
+
+# Identify numeric and categorical columns
+numeric_features = X_train.select_dtypes(include=['int64', 'float64']).columns.tolist()
+categorical_features = X_train.select_dtypes(include=['object', 'category']).columns.tolist()
+
+# Define preprocessing for numeric and categorical data
+numeric_transformer = StandardScaler()
+categorical_transformer = OneHotEncoder(handle_unknown='ignore')
+
+# Combine preprocessing steps
+preprocessor = ColumnTransformer(
+    transformers=[
+        ('num', numeric_transformer, numeric_features),
+        ('cat', categorical_transformer, categorical_features)
+    ])
+
+# Define the model (XGBoost multiclass classifier)
+model = XGBClassifier(
+    objective='multi:softmax',  # For multiclass classification
+    num_class=len(y_train.unique()),  # Number of classes
+    eval_metric='mlogloss',
+    use_label_encoder=False,
+    random_state=42
+)
+
+# Create the pipeline
+pipeline = Pipeline(steps=[
+    ('preprocessor', preprocessor),
+    ('classifier', model)
+])
+
+# Train the model
+pipeline.fit(X_train, y_train)
+
+# Predict on test data
+y_pred = pipeline.predict(X_test)
+
+# Evaluate the model
+print(classification_report(y_test, y_pred))
