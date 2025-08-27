@@ -58,3 +58,39 @@ y_pred = pipeline.predict(X_test)
 
 # Evaluate the model
 print(classification_report(y_test, y_pred))
+
+
+
+
+
+
+
+
+
+
+
+
+SELECT 
+  CASE 
+    WHEN purchase_date IS NULL THEN 'no conversion'
+    WHEN DATEDIFF(day, DATE(full_timestamp), purchase_date) <= 3 THEN 'within 3 days'
+    WHEN DATEDIFF(day, DATE(full_timestamp), purchase_date) BETWEEN 4 AND 7 THEN 'within 4 to 7 days'
+    WHEN DATEDIFF(day, DATE(full_timestamp), purchase_date) BETWEEN 8 AND 15 THEN 'within 8 to 15 days'
+    WHEN DATEDIFF(day, DATE(full_timestamp), purchase_date) BETWEEN 16 AND 30 THEN 'within 16 to 30 days'
+    WHEN DATEDIFF(day, DATE(full_timestamp), purchase_date) > 30 THEN 'more than 30 days'
+    ELSE 'unknown'
+  END AS conversion_time_bucket,
+  COUNT(*) AS count_rows
+FROM your_table
+GROUP BY conversion_time_bucket
+ORDER BY 
+  CASE 
+    WHEN conversion_time_bucket = 'no conversion' THEN 1
+    WHEN conversion_time_bucket = 'within 3 days' THEN 2
+    WHEN conversion_time_bucket = 'within 4 to 7 days' THEN 3
+    WHEN conversion_time_bucket = 'within 8 to 15 days' THEN 4
+    WHEN conversion_time_bucket = 'within 16 to 30 days' THEN 5
+    WHEN conversion_time_bucket = 'more than 30 days' THEN 6
+    ELSE 7
+  END;
+
