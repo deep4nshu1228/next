@@ -1,0 +1,83 @@
+import pandas as pd
+from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import LabelEncoder, OneHotEncoder, StandardScaler
+from sklearn.compose import ColumnTransformer
+from sklearn.pipeline import Pipeline
+from imblearn.pipeline import Pipeline as ImbPipeline
+from imblearn.over_sampling import SMOTE
+from xgboost import XGBClassifier
+from sklearn.metrics import classification_report, confusion_matrix, ConfusionMatrixDisplay
+import matplotlib.pyplot as plt
+
+# Assume df contains features and 'Conversion_time_bucket' target
+
+# Label encode target variable
+le = LabelEncoder()
+df['Conversion_time_bucket_enc'] = le.fit_transform(df['Conversion_time_bucket'])
+
+# Split features and target
+X = df.drop(columns=['Conversion_time_bucket', 'Conversion_time_bucket_enc', 'converted'])  # Drop any other targets if present
+y = df['Conversion_time_bucket_enc']
+
+# Split train-test with stratification
+X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, stratify=y, random_state=42)
+
+# Identify numeric and categorical features
+numeric_features = X_train.select_dtypes(include=['int64', 'float64']).columns.tolist()
+categorical_features = X_train.select_dtypes(include=['object', 'category']).columns.tolist()
+
+# Preprocessing pipelines
+numeric_transformer = StandardScaler()
+categorical_transformer = OneHotEncoder(handle_unknown='ignore')
+
+preprocessor = ColumnTransformer([
+    ('num', numeric_transformer, numeric_features),
+    ('cat', categorical_transformer, categorical_features)
+])
+
+# Define SMOTE for oversampling
+smote = SMOTE(random_state=42)
+
+# Compute class weights inversely proportional to class frequencies
+from sklearn.utils.class_weight import compute_class_weight
+import numpy as np
+
+class_weights = compute_class_weight(class_weight='balanced', classes=np.unique(y_train), y=y_train)
+weights_dict = {i : class_weights[i] for i in range(len(class_weights))}
+# Assign sample weights per instance
+sample_weights = y_train.map(weights_dict)
+
+# Define XGBoost with multiclass objective
+model = XGBClassifier(
+    objective='multi:softmax',
+    num_class=len(le.classes_),
+    eval_metric='mlogloss',
+    use_label_encoder=False,
+    random_state=42
+)
+
+# Create an imbalanced-learn pipeline: preprocessing, oversampling, model fitting
+pipeline = ImbPipeline(steps=[
+    ('preprocessor', preprocessor),
+    ('smote', smote),
+    ('classifier', model)
+])
+
+# Fit model with sample weights
+pipeline.fit(X_train, y_train, classifier__sample_weight=sample_weights)
+
+# Predict test set
+y_pred = pipeline.predict(X_test)
+
+# Decode predictions back to original labels
+y_test_labels = le.inverse_transform(y_test)
+y_pred_labels = le.inverse_transform(y_pred)
+
+# Classification report
+print(classification_report(y_test_labels, y_pred_labels))
+
+# Confusion matrix
+cm = confusion_matrix(y_test_labels, y_pred_labels, labels=le.classes_)
+disp = ConfusionMatrixDisplay(confusion_matrix=cm, display_labels=le.classes_)
+disp.plot(cmap='Blues', xticks_rotation=45)
+plt.show()
