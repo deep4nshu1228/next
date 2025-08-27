@@ -1,0 +1,94 @@
+import pandas as pd
+from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import LabelEncoder, OneHotEncoder, StandardScaler
+from sklearn.compose import ColumnTransformer
+from sklearn.pipeline import Pipeline
+from imblearn.pipeline import Pipeline as ImbPipeline
+from imblearn.over_sampling import SMOTE, ADASYN, BorderlineSMOTE
+from imblearn.under_sampling import RandomUnderSampler
+from xgboost import XGBClassifier
+from sklearn.metrics import classification_report, confusion_matrix, ConfusionMatrixDisplay
+import matplotlib.pyplot as plt
+from sklearn.utils.class_weight import compute_class_weight
+import numpy as np
+
+# Define imbalance methods you want to test here
+imbalance_methods = {
+    'none': None,
+    'smote': SMOTE(random_state=42),
+    'adasyn': ADASYN(random_state=42),
+    'borderline_smote': BorderlineSMOTE(random_state=42),
+    'random_undersampling': RandomUnderSampler(random_state=42)
+}
+
+# Choose your method here (change key as needed)
+imbalance_method_key = 'none'  # options: 'none', 'smote', 'adasyn', 'borderline_smote', 'random_undersampling'
+
+# Example DataFrame df with features & target 'Conversion_time_bucket'
+le = LabelEncoder()
+df['target_enc'] = le.fit_transform(df['Conversion_time_bucket'])
+
+X = df.drop(columns=['Conversion_time_bucket', 'target_enc', 'converted'])  # drop other target columns
+y = df['target_enc']
+
+# Split data
+X_train, X_test, y_train, y_test = train_test_split(
+    X, y, test_size=0.2, stratify=y, random_state=42)
+
+# Preprocessing pipelines
+numeric_features = X_train.select_dtypes(include=['int64', 'float64']).columns.tolist()
+categorical_features = X_train.select_dtypes(include=['object', 'category']).columns.tolist()
+
+numeric_transformer = StandardScaler()
+categorical_transformer = OneHotEncoder(handle_unknown='ignore')
+
+preprocessor = ColumnTransformer([
+    ('num', numeric_transformer, numeric_features),
+    ('cat', categorical_transformer, categorical_features)
+])
+
+# Compute class weights to be used with class_weight param or sample weights
+class_weights_arr = compute_class_weight(class_weight='balanced', classes=np.unique(y_train), y=y_train)
+class_weights_dict = {i: w for i, w in enumerate(class_weights_arr)}
+
+# Instantiate XGB classifier (no weight param here, sample_weight below instead)
+model = XGBClassifier(
+    objective='multi:softmax',
+    num_class=len(le.classes_),
+    eval_metric='mlogloss',
+    use_label_encoder=False,
+    random_state=42
+)
+
+# Construct pipeline steps
+steps = [('preprocessor', preprocessor)]
+
+imbalance_sampler = imbalance_methods[imbalance_method_key]
+if imbalance_sampler:
+    steps.append(('sampler', imbalance_sampler))  # For oversampling/undersampling
+
+steps.append(('classifier', model))
+
+pipeline = ImbPipeline(steps=steps)
+
+# Prepare sample weights for training
+if imbalance_method_key == 'none':
+    # Use sample weights for imbalance correction when not using sampler
+    sample_weights = pd.Series(y_train).map(class_weights_dict).values
+    pipeline.fit(X_train, y_train, classifier__sample_weight=sample_weights)
+else:
+    # If using sampler, fit without sample weights (sampler balances data)
+    pipeline.fit(X_train, y_train)
+
+# Predict and evaluate
+y_pred = pipeline.predict(X_test)
+y_test_labels = le.inverse_transform(y_test)
+y_pred_labels = le.inverse_transform(y_pred)
+
+print(f"--- Results with imbalance method: {imbalance_method_key} ---\n")
+print(classification_report(y_test_labels, y_pred_labels))
+
+cm = confusion_matrix(y_test_labels, y_pred_labels, labels=le.classes_)
+disp = ConfusionMatrixDisplay(confusion_matrix=cm, display_labels=le.classes_)
+disp.plot(cmap='Blues', xticks_rotation=45)
+plt.show()
