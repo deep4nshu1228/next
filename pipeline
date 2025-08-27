@@ -104,3 +104,131 @@ for method, metric in results.items():
         print(f"{method}: Error - {metric['error']}")
     else:
         print(f"{method}: Accuracy={metric['accuracy']:.4f}, Weighted F1={metric['weighted_f1']:.4f}")
+
+
+
+
+
+
+
+######################## Multiple sampling and classifires ########################################
+
+import pandas as pd
+from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import LabelEncoder, OneHotEncoder, StandardScaler
+from sklearn.compose import ColumnTransformer
+from imblearn.pipeline import Pipeline as ImbPipeline
+from imblearn.over_sampling import SMOTE, ADASYN, BorderlineSMOTE
+from imblearn.under_sampling import RandomUnderSampler
+from xgboost import XGBClassifier
+from lightgbm import LGBMClassifier
+from catboost import CatBoostClassifier
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.metrics import classification_report, confusion_matrix, ConfusionMatrixDisplay, f1_score, accuracy_score
+import matplotlib.pyplot as plt
+from sklearn.utils.class_weight import compute_class_weight
+import numpy as np
+
+# Define sampling methods
+sampling_methods = {
+    'none': None,
+    'smote': SMOTE(random_state=42),
+    'adasyn': ADASYN(random_state=42),
+    'borderline_smote': BorderlineSMOTE(random_state=42),
+    'random_undersampling': RandomUnderSampler(random_state=42)
+}
+
+# Define classifiers
+classifiers = {
+    'XGBoost': XGBClassifier(objective='multi:softmax', num_class=None, use_label_encoder=False, eval_metric='mlogloss', random_state=42),
+    'LightGBM': LGBMClassifier(objective='multiclass', random_state=42),
+    'CatBoost': CatBoostClassifier(loss_function='MultiClass', verbose=0, random_state=42),
+    'RandomForest': RandomForestClassifier(random_state=42)
+}
+
+# Prepare data
+le = LabelEncoder()
+df['target_enc'] = le.fit_transform(df['Conversion_time_bucket'])
+
+X = df.drop(columns=['Conversion_time_bucket', 'target_enc', 'converted'])
+y = df['target_enc']
+
+X_train, X_test, y_train, y_test = train_test_split(
+    X, y, test_size=0.2, stratify=y, random_state=42)
+
+numeric_features = X_train.select_dtypes(include=['int64', 'float64']).columns.tolist()
+categorical_features = X_train.select_dtypes(include=['object', 'category']).columns.tolist()
+
+numeric_transformer = StandardScaler()
+categorical_transformer = OneHotEncoder(handle_unknown='ignore')
+
+preprocessor = ColumnTransformer([
+    ('num', numeric_transformer, numeric_features),
+    ('cat', categorical_transformer, categorical_features)
+])
+
+# Update classifiers num_class param if needed
+for clf_name, clf in classifiers.items():
+    if hasattr(clf, 'num_class'):
+        clf.num_class = len(le.classes_)
+
+# Compute class weights for no sampling case
+class_weights_arr = compute_class_weight(class_weight='balanced', classes=np.unique(y_train), y=y_train)
+class_weights_dict = {i: w for i, w in enumerate(class_weights_arr)}
+
+results = []
+
+# Loop through each combination of sampling method and classifier
+for sampling_name, sampler in sampling_methods.items():
+    for clf_name, clf in classifiers.items():
+        print(f"\nRunning pipeline with Sampling: {sampling_name}, Classifier: {clf_name}")
+
+        steps = [('preprocessor', preprocessor)]
+        if sampler:
+            steps.append(('sampler', sampler))
+        steps.append(('classifier', clf))
+
+        pipeline = ImbPipeline(steps=steps)
+
+        try:
+            if sampling_name == 'none':
+                sample_weights = pd.Series(y_train).map(class_weights_dict).values
+                pipeline.fit(X_train, y_train, classifier__sample_weight=sample_weights)
+            else:
+                pipeline.fit(X_train, y_train)
+
+            y_pred = pipeline.predict(X_test)
+            y_test_labels = le.inverse_transform(y_test)
+            y_pred_labels = le.inverse_transform(y_pred)
+
+            print(classification_report(y_test_labels, y_pred_labels))
+
+            acc = accuracy_score(y_test_labels, y_pred_labels)
+            f1 = f1_score(y_test_labels, y_pred_labels, average='weighted')
+
+            results.append({
+                'sampling': sampling_name,
+                'classifier': clf_name,
+                'accuracy': acc,
+                'weighted_f1': f1
+            })
+
+            cm = confusion_matrix(y_test_labels, y_pred_labels, labels=le.classes_)
+            disp = ConfusionMatrixDisplay(confusion_matrix=cm, display_labels=le.classes_)
+            disp.plot(cmap='Blues', xticks_rotation=45)
+            plt.title(f'Sampling: {sampling_name}, Classifier: {clf_name}')
+            plt.show()
+
+        except Exception as e:
+            print(f"Error with Sampling: {sampling_name}, Classifier: {clf_name} -> {e}")
+            results.append({
+                'sampling': sampling_name,
+                'classifier': clf_name,
+                'error': str(e)
+            })
+
+# Summary table
+results_df = pd.DataFrame(results)
+print("\nSummary of all experiments:")
+print(results_df)
+
