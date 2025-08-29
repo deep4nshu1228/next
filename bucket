@@ -17,3 +17,25 @@ def bucket_conversion_time(x):
 
 # Apply the function to create new column
 df['Conversion_time_bucket'] = df['TIME_TO_PURCHASE'].apply(bucket_conversion_time)
+
+
+
+
+
+
+###### AGE BUCKET ########
+
+SELECT
+  t.*,
+  CUSTOMER_AGE,
+  CASE
+    WHEN CUSTOMER_AGE IS NULL THEN 'unknown'
+    WHEN CUSTOMER_AGE < 18 THEN '<18'
+    WHEN CUSTOMER_AGE BETWEEN 18 AND 24 THEN '18-24'
+    WHEN CUSTOMER_AGE BETWEEN 25 AND 34 THEN '25-34'
+    WHEN CUSTOMER_AGE BETWEEN 35 AND 44 THEN '35-44'
+    WHEN CUSTOMER_AGE BETWEEN 45 AND 54 THEN '45-54'
+    WHEN CUSTOMER_AGE BETWEEN 55 AND 64 THEN '55-64'
+    ELSE '65+'
+  END AS AGE_BAND
+FROM YOUR_DB.YOUR_SCHEMA.YOUR_TABLE t;
