@@ -1,0 +1,45 @@
+import pandas as pd
+from pandas.tseries.offsets import MonthBegin
+
+def create_month_list(start_month, num_months):
+    return (pd.date_range(start=start_month, periods=num_months, freq='MS')
+            .strftime('%Y-%m').tolist())
+
+ref_months = create_month_list('2020-01', num_months_needed)
+results = []
+
+for ref in ref_months:
+    ref_dt = pd.to_datetime(ref)
+    start_date = ref_dt
+    end_date = ref_dt + MonthBegin(11)
+    start_dispatch = ref_dt - MonthBegin(60)
+    end_dispatch = ref_dt - MonthBegin(1)
+    
+    # Filter warranty df
+    valid_dispatch_months = create_month_list((ref_dt - MonthBegin(60)).strftime('%Y-%m'), 60)
+    df_w = warranty_df[
+        (warranty_df['WARRANTY_MONTH'] >= start_date.strftime('%Y-%m')) &
+        (warranty_df['WARRANTY_MONTH'] <= end_date.strftime('%Y-%m')) &
+        (warranty_df['DISPATCH_MONTH'].isin(valid_dispatch_months))
+    ]
+    warranty_cost = df_w['WARRANTY_COST'].sum()
+    
+    # Filter volume df
+    df_v = volume_df[
+        (volume_df['DISPATCH_MONTH'] >= start_dispatch.strftime('%Y-%m')) &
+        (volume_df['DISPATCH_MONTH'] <= end_dispatch.strftime('%Y-%m'))
+    ]
+    # Group as needed (e.g. by plant, model_group, as per business logic)
+    volume = df_v['VOLUME'].sum()
+    
+    results.append({
+        "REF_MONTH": ref,
+        "START_DATE": start_date.strftime('%Y-%m'),
+        "END_DATE": end_date.strftime('%Y-%m'),
+        "START_PAST_DISPATCH_MONTH": start_dispatch.strftime('%Y-%m'),
+        "END_PAST_DISPATCH_MONTH": end_dispatch.strftime('%Y-%m'),
+        "WARRANTY_COST": warranty_cost,
+        "VOLUME": volume,
+    })
+
+final_df = pd.DataFrame(results)
