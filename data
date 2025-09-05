@@ -1,0 +1,48 @@
+import pandas as pd
+import numpy as np
+
+# Categorize followup counts
+def categorize_followups(x):
+    if x == 0:
+        return '0'
+    elif x == 1:
+        return '1'
+    elif x == 2:
+        return '2'
+    elif x > 10:
+        return '>10'
+    else:
+        return str(x)
+
+df['Followup Bracket'] = df['followup count'].apply(categorize_followups)
+
+# Total Enquiry Count by followup bracket
+total_enquiry_count = df.groupby('Followup Bracket').size().rename('Total Enquiry Count').reset_index()
+
+# Converted Enquiry Count (target==1)
+converted_enquiry_count = df[df['target']==1].groupby('Followup Bracket').size().rename('Converted Enquiry Count').reset_index()
+
+# Merge the counts
+summary = total_enquiry_count.merge(converted_enquiry_count, on='Followup Bracket', how='left').fillna(0)
+summary['Converted Enquiry Count'] = summary['Converted Enquiry Count'].astype(int)
+
+# Calculate average time to convert (for converted enquiries only)
+df['enquiry created'] = pd.to_datetime(df['enquiry created'])
+df['purchase date'] = pd.to_datetime(df['purchase date'], errors='coerce')
+df['Time to Convert (days)'] = (df['purchase date'] - df['enquiry created']).dt.days
+
+avg_conversion_time = (
+    df[df['target'] == 1]
+    .groupby('Followup Bracket')['Time to Convert (days)']
+    .mean()
+    .round(2)
+    .reset_index()
+    .rename(columns={'Time to Convert (days)': 'Avg Time to Convert (days)'})
+)
+
+# Merge conversion time to summary
+summary = summary.merge(avg_conversion_time, on='Followup Bracket', how='left')
+
+# Final summary table
+summary = summary[['Followup Bracket','Total Enquiry Count','Converted Enquiry Count','Avg Time to Convert (days)']]
+print(summary)
