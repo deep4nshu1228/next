@@ -84,3 +84,24 @@ Assumptions, limitations, and model validation metrics
 FAQs addressing common leadership concerns
 
 Q&A session
+
+
+
+
+
+
+
+
+
+
+
+###############################
+Context: Warranty reserves require reliable estimation and clear disclosure, directly influencing margins, cash, and planning cadence.
+
+Challenge: Current accrual practices trail shifts in product mix and claim maturation, creating preventable volatility and uncertainty in planning signals.
+
+Approach: Implement a cohort‑based monthly model that learns from the last 60 dispatch months to forecast the next 60 months, with rolling validation and explainable governance.
+
+Way forward: Launch a governed pilot with defined scope, ownership, KPIs, variance thresholds, and an override policy to embed this into monthly and quarterly reviews.
+
+
