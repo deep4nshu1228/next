@@ -1,40 +1,31 @@
 import pandas as pd
-import numpy as np
 
-# Set the correct columns for the dataset
-DATE_COL = "WARRANTY_CLAIM_DATE"   # or SALE_DATE / your date column
-VALUE_COL = "WARRANTY_COST"        # or PRICE / your value column
-
-# Ensure df is loaded, e.g.:
 # df = pd.read_csv("cleaned.csv")
 
-# Dtypes
-df[DATE_COL] = pd.to_datetime(df[DATE_COL], errors="coerce")
-df[VALUE_COL] = pd.to_numeric(df[VALUE_COL], errors="coerce")
+# Ensure dtypes
+df["WARRANTY_CLAIM_DATE"] = pd.to_datetime(df["WARRANTY_CLAIM_DATE"], errors="coerce")
+df["WARRANTY_COST"] = pd.to_numeric(df["WARRANTY_COST"], errors="coerce")
 
-# Monthly aggregation: use .mean() for prices, .sum() if you want totals
-monthly = (
-    df.set_index(DATE_COL)
-      .resample("M")[VALUE_COL]
-      .mean()
-      .dropna()
-    .to_frame("value")
+# Warranty month as period
+df["warranty_month"] = df["WARRANTY_CLAIM_DATE"].dt.to_period("M")
+
+# Pivot: model family x warranty month -> total cost
+pivot = pd.pivot_table(
+    df,
+    index="BIKE_GROUPED",          # model family
+    columns="warranty_month",      # month buckets
+    values="WARRANTY_COST",
+    aggfunc="sum",
+    fill_value=0
 )
 
-# Time index for linear regression t = 0..N-1
-monthly["t"] = np.arange(len(monthly))
+# Sort columns chronologically and rows by total cost
+pivot = pivot.sort_index(axis=1)
+pivot["row_total"] = pivot.sum(axis=1)
+pivot = pivot.sort_values("row_total", ascending=False)
 
-# Linear fit value = a + b*t
-b, a = np.polyfit(monthly["t"], monthly["value"], 1)  # slope, intercept
-monthly["linear_fit"] = a + b * monthly["t"]
+# Optional: format month columns as mm-YYYY
+pivot.columns = [c.strftime("%m-%Y") if hasattr(c, "strftime") else str(c) for c in pivot.columns]
 
-# Optional: fit quality
-ss_res = ((monthly["value"] - monthly["linear_fit"])**2).sum()
-ss_tot = ((monthly["value"] - monthly["value"].mean())**2).sum()
-r2 = float("nan") if ss_tot == 0 else 1 - ss_res/ss_tot
-print(f"slope={b:.6f}, intercept={a:.6f}, R2={r2:.4f}")
-
-# Save for plotting
-out = monthly.reset_index().rename(columns={DATE_COL: "month"})
-out["month_str"] = out["month"].dt.strftime("%Y-%m")
-out.to_csv("monthly_trend_with_linear_fit.csv", index=False)
+# Save
+pivot.to_csv("pivot_warranty_cost_by_model_family_month.csv")
