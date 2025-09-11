@@ -1,13 +1,31 @@
 import pandas as pd
 
-# df = pd.read_csv('cleaned.csv')  # ensure df is loaded with BIKE_NAME and WARRANTY_COST
+# df = pd.read_csv('cleaned.csv')
 
-cost_by_bike = (
-    df.groupby("BIKE_NAME", dropna=False)["WARRANTY_COST"]
+# Ensure dtypes
+df["WARRANTY_CLAIM_DATE"] = pd.to_datetime(df["WARRANTY_CLAIM_DATE"], errors="coerce")
+df["WARRANTY_COST"] = pd.to_numeric(df["WARRANTY_COST"], errors="coerce")
+
+# Extract year
+df["claim_year"] = df["WARRANTY_CLAIM_DATE"].dt.year
+
+# Aggregate
+yearly_cost = (
+    df.groupby("claim_year")["WARRANTY_COST"]
       .sum(min_count=1)
       .reset_index(name="total_warranty_cost")
-      .sort_values("total_warranty_cost", ascending=False)
+      .sort_values("claim_year")
 )
 
-cost_by_bike.to_csv("bike_name_total_warranty_cost.csv", index=False)
-cost_by_bike.head()
+# Optional: add counts
+yearly_counts = (
+    df.groupby("claim_year")
+      .size()
+      .reset_index(name="total_claims")
+)
+
+yearly_summary = yearly_cost.merge(yearly_counts, on="claim_year", how="left")
+
+# Save
+yearly_summary.to_csv("warranty_cost_by_year.csv", index=False)
+yearly_summary.head()
