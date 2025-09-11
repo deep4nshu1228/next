@@ -1,27 +1,13 @@
-
 import pandas as pd
 
-# df = pd.read_csv('renamed_with_months.csv')  # or your current file
+# df = pd.read_csv('cleaned.csv')  # ensure df loaded with BIKE_NAME
 
-# Ensure date is datetime
-df["WARRANTY_CLAIM_DATE"] = pd.to_datetime(df["WARRANTY_CLAIM_DATE"], errors="coerce")
-
-# Group and aggregate
-summary = (
-    df.groupby("PLANT")
-      .agg(
-          plant_warranty_cost=("WARRANTY_COST", "sum"),
-          total_claims=("WARRANTY_CLAIM_DATE", "count"),  # counts non-null dates
-          first_warranty_claim_date=("WARRANTY_CLAIM_DATE", "min"),
-          last_warranty_claim_date=("WARRANTY_CLAIM_DATE", "max"),
-      )
-      .reset_index()
+bike_counts = (
+    df.groupby("BIKE_NAME")
+      .size()
+      .reset_index(name="total_warranty_count")
+      .sort_values("total_warranty_count", ascending=False)
 )
 
-# Optional: format dates to strings
-# summary["first_warranty_claim_date"] = summary["first_warranty_claim_date"].dt.strftime("%Y-%m-%d")
-# summary["last_warranty_claim_date"]  = summary["last_warranty_claim_date"].dt.strftime("%Y-%m-%d")
-
-# Save or view
-summary.to_csv("plant_warranty_summary.csv", index=False)
-summary.head()
+bike_counts.to_csv("bike_name_warranty_counts.csv", index=False)
+bike_counts.head()
