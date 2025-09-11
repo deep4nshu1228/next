@@ -1,13 +1,13 @@
 import pandas as pd
 
-# df = pd.read_csv('cleaned.csv')  # ensure df loaded with BIKE_NAME
+# df = pd.read_csv('cleaned.csv')  # ensure df is loaded with BIKE_NAME and WARRANTY_COST
 
-bike_counts = (
-    df.groupby("BIKE_NAME")
-      .size()
-      .reset_index(name="total_warranty_count")
-      .sort_values("total_warranty_count", ascending=False)
+cost_by_bike = (
+    df.groupby("BIKE_NAME", dropna=False)["WARRANTY_COST"]
+      .sum(min_count=1)
+      .reset_index(name="total_warranty_cost")
+      .sort_values("total_warranty_cost", ascending=False)
 )
 
-bike_counts.to_csv("bike_name_warranty_counts.csv", index=False)
-bike_counts.head()
+cost_by_bike.to_csv("bike_name_total_warranty_cost.csv", index=False)
+cost_by_bike.head()
