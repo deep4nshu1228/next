@@ -2,28 +2,23 @@ import pandas as pd
 
 # df = pd.read_csv('cleaned.csv')
 
-# Ensure dispatch_month exists; if it's under another name, rename accordingly
-# df = df.rename(columns={"SALE_DATE": "dispatch_month"})  # example if needed
-
-# Parse dispatch_month
-dispatch = pd.to_datetime(df["dispatch_month"], errors="coerce")
-
-# If many NaT and the column is like '07-2025', try exact format
-if dispatch.isna().mean() > 0.5:
-    dispatch = pd.to_datetime(df["dispatch_month"], format="%m-%Y", errors="coerce")
-
-df["dispatch_year"] = dispatch.dt.year
-
-# Ensure cost numeric
+# Ensure dtypes
+df["WARRANTY_CLAIM_DATE"] = pd.to_datetime(df["WARRANTY_CLAIM_DATE"], errors="coerce")
 df["WARRANTY_COST"] = pd.to_numeric(df["WARRANTY_COST"], errors="coerce")
 
-# Aggregate
-by_dispatch_year = (
-    df.groupby("dispatch_year")["WARRANTY_COST"]
+# Derive month period and a label
+df["warranty_month"] = df["WARRANTY_CLAIM_DATE"].dt.to_period("M")
+
+cost_by_warranty_month = (
+    df.groupby("warranty_month")["WARRANTY_COST"]
       .sum(min_count=1)
       .reset_index(name="total_warranty_cost")
-      .sort_values("dispatch_year")
+      .sort_values("warranty_month")
 )
 
-by_dispatch_year.to_csv("warranty_cost_by_dispatch_year.csv", index=False)
-by_dispatch_year.head()
+# Optional: add mm-YYYY string label
+cost_by_warranty_month["warranty_month_str"] = cost_by_warranty_month["warranty_month"].dt.strftime("%m-%Y")
+
+# Save
+cost_by_warranty_month.to_csv("warranty_cost_by_warranty_month.csv", index=False)
+cost_by_warranty_month.head()
