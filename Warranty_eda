@@ -2,30 +2,28 @@ import pandas as pd
 
 # df = pd.read_csv('cleaned.csv')
 
-# Ensure dtypes
-df["WARRANTY_CLAIM_DATE"] = pd.to_datetime(df["WARRANTY_CLAIM_DATE"], errors="coerce")
+# Ensure dispatch_month exists; if it's under another name, rename accordingly
+# df = df.rename(columns={"SALE_DATE": "dispatch_month"})  # example if needed
+
+# Parse dispatch_month
+dispatch = pd.to_datetime(df["dispatch_month"], errors="coerce")
+
+# If many NaT and the column is like '07-2025', try exact format
+if dispatch.isna().mean() > 0.5:
+    dispatch = pd.to_datetime(df["dispatch_month"], format="%m-%Y", errors="coerce")
+
+df["dispatch_year"] = dispatch.dt.year
+
+# Ensure cost numeric
 df["WARRANTY_COST"] = pd.to_numeric(df["WARRANTY_COST"], errors="coerce")
 
-# Extract year
-df["claim_year"] = df["WARRANTY_CLAIM_DATE"].dt.year
-
 # Aggregate
-yearly_cost = (
-    df.groupby("claim_year")["WARRANTY_COST"]
+by_dispatch_year = (
+    df.groupby("dispatch_year")["WARRANTY_COST"]
       .sum(min_count=1)
       .reset_index(name="total_warranty_cost")
-      .sort_values("claim_year")
+      .sort_values("dispatch_year")
 )
 
-# Optional: add counts
-yearly_counts = (
-    df.groupby("claim_year")
-      .size()
-      .reset_index(name="total_claims")
-)
-
-yearly_summary = yearly_cost.merge(yearly_counts, on="claim_year", how="left")
-
-# Save
-yearly_summary.to_csv("warranty_cost_by_year.csv", index=False)
-yearly_summary.head()
+by_dispatch_year.to_csv("warranty_cost_by_dispatch_year.csv", index=False)
+by_dispatch_year.head()
