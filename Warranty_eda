@@ -1,31 +1,30 @@
 import pandas as pd
 
-# df = pd.read_csv("cleaned.csv")
-
-# Ensure dtypes
+# 1) Build pivot (if not already)
 df["WARRANTY_CLAIM_DATE"] = pd.to_datetime(df["WARRANTY_CLAIM_DATE"], errors="coerce")
 df["WARRANTY_COST"] = pd.to_numeric(df["WARRANTY_COST"], errors="coerce")
-
-# Warranty month as period
 df["warranty_month"] = df["WARRANTY_CLAIM_DATE"].dt.to_period("M")
 
-# Pivot: model family x warranty month -> total cost
 pivot = pd.pivot_table(
     df,
-    index="BIKE_GROUPED",          # model family
-    columns="warranty_month",      # month buckets
+    index="BIKE_GROUPED",
+    columns="warranty_month",       # PeriodIndex columns
     values="WARRANTY_COST",
     aggfunc="sum",
     fill_value=0
 )
 
-# Sort columns chronologically and rows by total cost
+# 2) Sort columns chronologically and add row_total
 pivot = pivot.sort_index(axis=1)
 pivot["row_total"] = pivot.sum(axis=1)
-pivot = pivot.sort_values("row_total", ascending=False)
+# Move row_total to the end
+pivot = pivot[[c for c in pivot.columns if c != "row_total"] + ["row_total"]]
 
-# Optional: format month columns as mm-YYYY
-pivot.columns = [c.strftime("%m-%Y") if hasattr(c, "strftime") else str(c) for c in pivot.columns]
+# 3) Relabel columns mm-YYYY (keep row_total as is)
+pivot.columns = [
+    c.strftime("%m-%Y") if hasattr(c, "strftime") else str(c)
+    for c in pivot.columns
+]
 
-# Save
-pivot.to_csv("pivot_warranty_cost_by_model_family_month.csv")
+# 4) Save
+pivot.to_csv("pivot_warranty_cost_by_model_family_month_sorted.csv")
