@@ -1,28 +1,36 @@
 import pandas as pd
 
-# Inputs:
-# dispatch: PLANT, MODEL, MODEL_FAMILY, DISPATCH_MONTH, VOLUME
-# claims_agg: PLANT, MODEL, MODEL_FAMILY, MONTH, NO_OF_VEHICLE_CLAIMED, AMT
-# Assumptions: MONTH and DISPATCH_MONTH are month-level; we’ll set them to Period[M].
+# Inputs expected:
+# dispatch: columns ["PLANT", "MODEL", "MODEL_FAMILY", "DISPATCH_MONTH", "VOLUME"]
+# claims/raw df: columns ["PLANT", "MODEL", "MODEL_FAMILY", "WARRANTY_CLAIM_DATE", "WARRANTY_COST"]
 
-gcols = ["PLANT", "MODEL", "MODEL_FAMILY"]
-global_start = pd.Period("2015-01", freq="M")
-global_end   = pd.Period("2025-08", freq="M")  # stop at Aug-2025
-
-# Normalize types
+# ----------------------------
+# 0) Normalize and prepare data
+# ----------------------------
 dispatch = dispatch.copy()
 dispatch["DISPATCH_MONTH"] = pd.to_datetime(dispatch["DISPATCH_MONTH"], errors="coerce").dt.to_period("M")
 dispatch["VOLUME"] = pd.to_numeric(dispatch["VOLUME"], errors="coerce").fillna(0)
 
-claims_agg = claims_agg.copy()
-claims_agg["MONTH"] = pd.to_datetime(claims_agg["MONTH"].astype(str), errors="coerce").dt.to_period("M")
+df = df.copy()
+df["WARRANTY_CLAIM_DATE"] = pd.to_datetime(df["WARRANTY_CLAIM_DATE"], errors="coerce")
+df["WARRANTY_CLAIM_MONTH"] = df["WARRANTY_CLAIM_DATE"].dt.to_period("M")
 
-# 1) Build a complete month grid per group from 2015-01 to 2025-08
+gcols = ["PLANT", "MODEL", "MODEL_FAMILY"]
+
+# Calendar bounds (inclusive)
+global_start = pd.Period("2015-01", freq="M")
+global_end   = pd.Period("2025-08", freq="M")  # stop at Aug-2025
+
+# --------------------------------------------
+# 1) Build complete monthly dispatch grid (0s)
+# --------------------------------------------
+# Unique groups across both dispatch and claims to ensure all present
 groups = pd.concat([
     dispatch[gcols].drop_duplicates(),
-    claims_agg[gcols].drop_duplicates()
+    df[gcols].drop_duplicates()
 ]).drop_duplicates()
 
+# Create one row per month for each group over the fixed calendar
 grids = []
 for _, row in groups.iterrows():
     rng = pd.period_range(global_start, global_end, freq="M")
@@ -34,18 +42,22 @@ for _, row in groups.iterrows():
     }))
 month_grid = pd.concat(grids, ignore_index=True)
 
-# 2) Join dispatch onto grid and fill zeros
+# Left-join dispatch and fill missing months with 0 volume
 dispatch_full = (
-    month_grid.merge(dispatch[gcols + ["DISPATCH_MONTH", "VOLUME"]],
-                     on=gcols + ["DISPATCH_MONTH"], how="left")
-              .fillna({"VOLUME": 0})
+    month_grid.merge(
+        dispatch[gcols + ["DISPATCH_MONTH", "VOLUME"]],
+        on=gcols + ["DISPATCH_MONTH"],
+        how="left"
+    )
+    .fillna({"VOLUME": 0})
 )
 
-# 3) Per-group rolling 60-month sum
-# Choose inclusive of current month (includes this month’s volume), or exclusive by shifting one month.
+# ---------------------------------------------------
+# 2) Compute 60-month vehicles-in-warranty via rolling
+# ---------------------------------------------------
 dispatch_full = dispatch_full.sort_values(gcols + ["DISPATCH_MONTH"])
 
-# Option A: inclusive (window includes current month)
+# Option A: Inclusive of current month (includes this month’s dispatch)
 pop_60 = (
     dispatch_full
       .set_index("DISPATCH_MONTH")
@@ -55,10 +67,10 @@ pop_60 = (
       .rename(columns={"VOLUME": "NO_OF_VEHICLES_IN_WARRANTY"})
 )
 
-# Option B: exclusive (exclude current month’s dispatch)
+# Option B: Exclusive of current month (uncomment to use)
+# dispatch_full["VOLUME_EXCL"] = dispatch_full.groupby(gcols)["VOLUME"].shift(1).fillna(0)
 # pop_60 = (
 #     dispatch_full
-#       .assign(VOLUME_EXCL=lambda d: d.groupby(gcols)["VOLUME"].shift(1).fillna(0))
 #       .set_index("DISPATCH_MONTH")
 #       .groupby(gcols)["VOLUME_EXCL"]
 #       .rolling(window=60, min_periods=1).sum()
@@ -66,10 +78,26 @@ pop_60 = (
 #       .rename(columns={"VOLUME_EXCL": "NO_OF_VEHICLES_IN_WARRANTY"})
 # )
 
-# 4) Align keys and month name
+# Align month key name
 pop_60 = pop_60.rename(columns={"DISPATCH_MONTH": "MONTH"})
 
-# 5) Merge ONLY the population into claims_agg
+# ---------------------------------------
+# 3) Claims monthly aggregation (claims_agg)
+# ---------------------------------------
+claims_agg = (
+    df[(df["WARRANTY_CLAIM_MONTH"] >= global_start) & (df["WARRANTY_CLAIM_MONTH"] <= global_end)]
+      .groupby(gcols + ["WARRANTY_CLAIM_MONTH"])
+      .agg(
+          NO_OF_VEHICLE_CLAIMED=("WARRANTY_COST", "size"),
+          AMT=("WARRANTY_COST", "sum")
+      )
+      .reset_index()
+      .rename(columns={"WARRANTY_CLAIM_MONTH": "MONTH"})
+)
+
+# ---------------------------------------
+# 4) Merge ONLY the population into claims
+# ---------------------------------------
 final = (
     claims_agg.merge(
         pop_60[gcols + ["MONTH", "NO_OF_VEHICLES_IN_WARRANTY"]],
@@ -80,3 +108,11 @@ final = (
 
 # Cleanup types
 final["NO_OF_VEHICLES_IN_WARRANTY"] = final["NO_OF_VEHICLES_IN_WARRANTY"].fillna(0).astype("int64")
+final["NO_OF_VEHICLE_CLAIMED"] = final["NO_OF_VEHICLE_CLAIMED"].astype("int64")
+final["AMT"] = final["AMT"].fillna(0.0)
+
+# final has:
+# MONTH (Period[M]), PLANT, MODEL, MODEL_FAMILY,
+# NO_OF_VEHICLES_IN_WARRANTY (rolling 60-month sum from dispatch),
+# NO_OF_VEHICLE_CLAIMED (claims count),
+# AMT (claims amount)
