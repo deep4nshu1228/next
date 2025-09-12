@@ -1,95 +1,95 @@
 import pandas as pd
 
-# 1) Ensure datetime/period monthly keys
+# Inputs:
+# dispatch: PLANT, MODEL, MODEL_FAMILY, DISPATCH_MONTH, VOLUME
+# df (claims): PLANT, MODEL, MODEL_FAMILY, WARRANTY_CLAIM_DATE, WARRANTY_COST
+
+# 0) Normalize types
+dispatch = dispatch.copy()
+dispatch["DISPATCH_MONTH"] = pd.to_datetime(dispatch["DISPATCH_MONTH"], errors="coerce").dt.to_period("M")
+dispatch["VOLUME"] = pd.to_numeric(dispatch["VOLUME"], errors="coerce").fillna(0)
+
+df = df.copy()
 df["WARRANTY_CLAIM_DATE"] = pd.to_datetime(df["WARRANTY_CLAIM_DATE"], errors="coerce")
-dispatch["DISPATCH_MONTH"] = pd.to_datetime(dispatch["DISPATCH_MONTH"], errors="coerce")
-
-# Use Period[M] keys for robust month joins/rolling by month
 df["WARRANTY_CLAIM_MONTH"] = df["WARRANTY_CLAIM_DATE"].dt.to_period("M")
-dispatch["DISPATCH_MONTH"] = dispatch["DISPATCH_MONTH"].dt.to_period("M")
 
-# 2) Prepare a per-month dispatch series per MODEL/MODEL_FAMILY/PLANT
-# Keep only needed columns and ensure VOLUME numeric
-dispatch_use = dispatch[["PLANT", "MODEL", "MODEL_FAMILY", "DISPATCH_MONTH", "VOLUME"]].copy()
-dispatch_use["VOLUME"] = pd.to_numeric(dispatch_use["VOLUME"], errors="coerce").fillna(0)
+# 1) Create a complete month grid from 2015-01 to the max month observed per group, then fill missing with 0
+gcols = ["PLANT", "MODEL", "MODEL_FAMILY"]
+global_start = pd.Period("2015-01", freq="M")  # Jan-2015
 
-# 3) Build a continuous monthly index per group to support a 60-month rolling sum
-# Reindex each group's monthly series to complete months, then rolling sum over 60 months
-dispatch_use = (
-    dispatch_use
-    .set_index("DISPATCH_MONTH")
-    .groupby(["PLANT", "MODEL", "MODEL_FAMILY"], group_keys=False)
-    .apply(lambda g: (
-        g["VOLUME"]
-        .asfreq("M", fill_value=0)  # monthly frequency with zeros for missing months
-        .rolling(window=60, min_periods=1).sum()  # last 60 months inclusive
-        .to_frame("WARRANTY_POP_60M")
-    ))
-    .reset_index()
+# Find max month per group across dispatch and claims to know where to stop
+max_dispatch = dispatch.groupby(gcols)["DISPATCH_MONTH"].max().rename("MAX_M").reset_index()
+max_claims = df.groupby(gcols)["WARRANTY_CLAIM_MONTH"].max().rename("MAX_M").reset_index()
+max_m = (
+    pd.concat([max_dispatch, max_claims], ignore_index=True)
+      .groupby(gcols, as_index=False)["MAX_M"].max()
 )
-# Now dispatch_use has: PLANT, MODEL, MODEL_FAMILY, DISPATCH_MONTH (Period[M]), WARRANTY_POP_60M
 
+# Build complete month ranges per group from 2015-01 to group max
+grids = []
+for _, row in max_m.iterrows():
+    rng = pd.period_range(global_start, row["MAX_M"], freq="M")
+    grids.append(pd.DataFrame({
+        "PLANT": row["PLANT"],
+        "MODEL": row["MODEL"],
+        "MODEL_FAMILY": row["MODEL_FAMILY"],
+        "DISPATCH_MONTH": rng
+    }))
+month_grid = pd.concat(grids, ignore_index=True)
 
+# Left-join dispatch onto the month grid, fill missing volumes with 0
+dispatch_full = (
+    month_grid.merge(dispatch[gcols + ["DISPATCH_MONTH", "VOLUME"]],
+                     on=gcols + ["DISPATCH_MONTH"], how="left")
+              .fillna({"VOLUME": 0})
+)
 
+# 2) Compute last-60-month warranty population using ref-month-and-range (no rolling)
 
-
-
-
-
-
-
-# 4) Aggregate claims per month and join
-# a) Claims count and amount per month/model/family/plant
+# a) Build claims monthly metrics and the reference months
 claims_agg = (
-    df.groupby(["PLANT", "MODEL", "MODEL_FAMILY", "WARRANTY_CLAIM_MONTH"])
+    df.groupby(gcols + ["WARRANTY_CLAIM_MONTH"])
       .agg(
-          VEHICLE_CLAIMS=("WARRANTY_COST", "size"),
-          WARRANTY_AMT=("WARRANTY_COST", "sum"),
+          NO_OF_VEHICLE_CLAIMED=("WARRANTY_COST", "size"),
+          AMT=("WARRANTY_COST", "sum")
       )
       .reset_index()
       .rename(columns={"WARRANTY_CLAIM_MONTH": "MONTH"})
 )
 
+# b) Reference months table
+ref = claims_agg[gcols + ["MONTH"]].drop_duplicates()
 
+# Choose inclusive window [MONTH-59, MONTH]; for exclusive use [MONTH-60, MONTH-1]
+ref["START"] = ref["MONTH"] - 59
+ref["END"] = ref["MONTH"]
 
+# c) Expand each ref month to the 60-month range via an offset cross join
+offsets = pd.Series(range(60), name="OFF")
+ref_expanded = ref.merge(offsets.to_frame(), how="cross")
+ref_expanded["DISPATCH_MONTH"] = ref_expanded["END"] - ref_expanded["OFF"]
+ref_expanded = ref_expanded.drop(columns=["OFF"])
 
+# d) Join to the filled dispatch_full to pull volumes and sum within the window
+joined = ref_expanded.merge(
+    dispatch_full[gcols + ["DISPATCH_MONTH", "VOLUME"]],
+    on=gcols + ["DISPATCH_MONTH"],
+    how="left"
+)
+joined["VOLUME"] = joined["VOLUME"].fillna(0)
 
+pop_60m = (
+    joined.groupby(gcols + ["MONTH"], as_index=False)["VOLUME"]
+          .sum()
+          .rename(columns={"VOLUME": "NO_OF_VEHICLES_IN_WARRANTY"})
+)
 
-
-# b) Map dispatch 60M population to the same month key
-dispatch_60 = dispatch_use.rename(columns={"DISPATCH_MONTH": "MONTH"})
-
-# 5) Combine: left join claims months to dispatch 60M pop (or outer if months exist without claims)
+# 3) Final dataset: join claims metrics with the 60M population
 final = (
-    claims_agg.merge(
-        dispatch_60,
-        on=["PLANT", "MODEL", "MODEL_FAMILY", "MONTH"],
-        how="left"
-    )
-    .rename(columns={
-        "WARRANTY_POP_60M": "NO_OF_VEHICLES_IN_WARRANTY",
-        "VEHICLE_CLAIMS": "NO_OF_VEHICLE_CLAIMED",
-        "WARRANTY_AMT": "AMT"
-    })
+    claims_agg.merge(pop_60m, on=gcols + ["MONTH"], how="left")
 )
 
-# Optional: if rows with no dispatch history should show 0 instead of NaN
+# Optional: ensure integer and float types
+final["NO_OF_VEHICLE_CLAIMED"] = final["NO_OF_VEHICLE_CLAIMED"].astype("int64")
 final["NO_OF_VEHICLES_IN_WARRANTY"] = final["NO_OF_VEHICLES_IN_WARRANTY"].fillna(0).astype("int64")
-
-# 6) Optional: include months with dispatch but zero claims
-# Build a complete month-by-model grid from dispatch_60 and left join claims in
-base = dispatch_60.copy()
-base = base[["PLANT", "MODEL", "MODEL_FAMILY", "MONTH", "WARRANTY_POP_60M"]].drop_duplicates()
-
-final_all = (
-    base.merge(
-        claims_agg,
-        on=["PLANT", "MODEL", "MODEL_FAMILY", "MONTH"],
-        how="left"
-    )
-    .rename(columns={"WARRANTY_POP_60M": "NO_OF_VEHICLES_IN_WARRANTY"})
-)
-final_all["NO_OF_VEHICLE_CLAIMED"] = final_all["WARRANTY_COST"].fillna(0).astype("int64") if "WARRANTY_COST" in final_all else final_all["NO_OF_VEHICLE_CLAIMED"].fillna(0).astype("int64")
-final_all["AMT"] = final_all["WARRANTY_AMT"].fillna(0.0)
-final_all = final_all.drop(columns=[c for c in ["WARRANTY_AMT"] if c in final_all.columns])
-
+final["AMT"] = final["AMT"].fillna(0.0)
