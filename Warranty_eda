@@ -28,3 +28,68 @@ dispatch_use = (
     .reset_index()
 )
 # Now dispatch_use has: PLANT, MODEL, MODEL_FAMILY, DISPATCH_MONTH (Period[M]), WARRANTY_POP_60M
+
+
+
+
+
+
+
+
+
+
+# 4) Aggregate claims per month and join
+# a) Claims count and amount per month/model/family/plant
+claims_agg = (
+    df.groupby(["PLANT", "MODEL", "MODEL_FAMILY", "WARRANTY_CLAIM_MONTH"])
+      .agg(
+          VEHICLE_CLAIMS=("WARRANTY_COST", "size"),
+          WARRANTY_AMT=("WARRANTY_COST", "sum"),
+      )
+      .reset_index()
+      .rename(columns={"WARRANTY_CLAIM_MONTH": "MONTH"})
+)
+
+
+
+
+
+
+
+# b) Map dispatch 60M population to the same month key
+dispatch_60 = dispatch_use.rename(columns={"DISPATCH_MONTH": "MONTH"})
+
+# 5) Combine: left join claims months to dispatch 60M pop (or outer if months exist without claims)
+final = (
+    claims_agg.merge(
+        dispatch_60,
+        on=["PLANT", "MODEL", "MODEL_FAMILY", "MONTH"],
+        how="left"
+    )
+    .rename(columns={
+        "WARRANTY_POP_60M": "NO_OF_VEHICLES_IN_WARRANTY",
+        "VEHICLE_CLAIMS": "NO_OF_VEHICLE_CLAIMED",
+        "WARRANTY_AMT": "AMT"
+    })
+)
+
+# Optional: if rows with no dispatch history should show 0 instead of NaN
+final["NO_OF_VEHICLES_IN_WARRANTY"] = final["NO_OF_VEHICLES_IN_WARRANTY"].fillna(0).astype("int64")
+
+# 6) Optional: include months with dispatch but zero claims
+# Build a complete month-by-model grid from dispatch_60 and left join claims in
+base = dispatch_60.copy()
+base = base[["PLANT", "MODEL", "MODEL_FAMILY", "MONTH", "WARRANTY_POP_60M"]].drop_duplicates()
+
+final_all = (
+    base.merge(
+        claims_agg,
+        on=["PLANT", "MODEL", "MODEL_FAMILY", "MONTH"],
+        how="left"
+    )
+    .rename(columns={"WARRANTY_POP_60M": "NO_OF_VEHICLES_IN_WARRANTY"})
+)
+final_all["NO_OF_VEHICLE_CLAIMED"] = final_all["WARRANTY_COST"].fillna(0).astype("int64") if "WARRANTY_COST" in final_all else final_all["NO_OF_VEHICLE_CLAIMED"].fillna(0).astype("int64")
+final_all["AMT"] = final_all["WARRANTY_AMT"].fillna(0.0)
+final_all = final_all.drop(columns=[c for c in ["WARRANTY_AMT"] if c in final_all.columns])
+
