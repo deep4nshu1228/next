@@ -1,7 +1,30 @@
 import pandas as pd
 
-# Ensure datetime
+# 1) Ensure datetime/period monthly keys
 df["WARRANTY_CLAIM_DATE"] = pd.to_datetime(df["WARRANTY_CLAIM_DATE"], errors="coerce")
+dispatch["DISPATCH_MONTH"] = pd.to_datetime(dispatch["DISPATCH_MONTH"], errors="coerce")
 
-# Period[M] like 2025-09
+# Use Period[M] keys for robust month joins/rolling by month
 df["WARRANTY_CLAIM_MONTH"] = df["WARRANTY_CLAIM_DATE"].dt.to_period("M")
+dispatch["DISPATCH_MONTH"] = dispatch["DISPATCH_MONTH"].dt.to_period("M")
+
+# 2) Prepare a per-month dispatch series per MODEL/MODEL_FAMILY/PLANT
+# Keep only needed columns and ensure VOLUME numeric
+dispatch_use = dispatch[["PLANT", "MODEL", "MODEL_FAMILY", "DISPATCH_MONTH", "VOLUME"]].copy()
+dispatch_use["VOLUME"] = pd.to_numeric(dispatch_use["VOLUME"], errors="coerce").fillna(0)
+
+# 3) Build a continuous monthly index per group to support a 60-month rolling sum
+# Reindex each group's monthly series to complete months, then rolling sum over 60 months
+dispatch_use = (
+    dispatch_use
+    .set_index("DISPATCH_MONTH")
+    .groupby(["PLANT", "MODEL", "MODEL_FAMILY"], group_keys=False)
+    .apply(lambda g: (
+        g["VOLUME"]
+        .asfreq("M", fill_value=0)  # monthly frequency with zeros for missing months
+        .rolling(window=60, min_periods=1).sum()  # last 60 months inclusive
+        .to_frame("WARRANTY_POP_60M")
+    ))
+    .reset_index()
+)
+# Now dispatch_use has: PLANT, MODEL, MODEL_FAMILY, DISPATCH_MONTH (Period[M]), WARRANTY_POP_60M
