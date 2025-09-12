@@ -14,21 +14,33 @@ df["WARRANTY_CLAIM_DATE"] = pd.to_datetime(df["WARRANTY_CLAIM_DATE"], errors="co
 df["WARRANTY_CLAIM_MONTH"] = df["WARRANTY_CLAIM_DATE"].dt.to_period("M")
 
 # 1) Create a complete month grid from 2015-01 to the max month observed per group, then fill missing with 0
+import pandas as pd
+
+# Normalize
+dispatch = dispatch.copy()
+dispatch["DISPATCH_MONTH"] = pd.to_datetime(dispatch["DISPATCH_MONTH"], errors="coerce").dt.to_period("M")
+dispatch["VOLUME"] = pd.to_numeric(dispatch["VOLUME"], errors="coerce").fillna(0)
+
+df = df.copy()
+df["WARRANTY_CLAIM_DATE"] = pd.to_datetime(df["WARRANTY_CLAIM_DATE"], errors="coerce")
+df["WARRANTY_CLAIM_MONTH"] = df["WARRANTY_CLAIM_DATE"].dt.to_period("M")
+
 gcols = ["PLANT", "MODEL", "MODEL_FAMILY"]
-global_start = pd.Period("2015-01", freq="M")  # Jan-2015
 
-# Find max month per group across dispatch and claims to know where to stop
-max_dispatch = dispatch.groupby(gcols)["DISPATCH_MONTH"].max().rename("MAX_M").reset_index()
-max_claims = df.groupby(gcols)["WARRANTY_CLAIM_MONTH"].max().rename("MAX_M").reset_index()
-max_m = (
-    pd.concat([max_dispatch, max_claims], ignore_index=True)
-      .groupby(gcols, as_index=False)["MAX_M"].max()
+# Boundaries
+global_start = pd.Period("2015-01", freq="M")
+global_end   = pd.Period("2025-08", freq="M")  # stop at Aug-2025
+
+# Build complete month grid per group from Jan-2015 to Aug-2025
+groups = (
+    pd.concat([
+        dispatch[gcols].drop_duplicates(),
+        df[gcols].drop_duplicates()
+    ]).drop_duplicates()
 )
-
-# Build complete month ranges per group from 2015-01 to group max
 grids = []
-for _, row in max_m.iterrows():
-    rng = pd.period_range(global_start, row["MAX_M"], freq="M")
+for _, row in groups.iterrows():
+    rng = pd.period_range(global_start, global_end, freq="M")
     grids.append(pd.DataFrame({
         "PLANT": row["PLANT"],
         "MODEL": row["MODEL"],
@@ -37,7 +49,7 @@ for _, row in max_m.iterrows():
     }))
 month_grid = pd.concat(grids, ignore_index=True)
 
-# Left-join dispatch onto the month grid, fill missing volumes with 0
+# Left-join dispatch and fill zeros for missing months
 dispatch_full = (
     month_grid.merge(dispatch[gcols + ["DISPATCH_MONTH", "VOLUME"]],
                      on=gcols + ["DISPATCH_MONTH"], how="left")
