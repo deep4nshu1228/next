@@ -8,3 +8,49 @@ FROM t0
 LEFT JOIN t1
 ON t1.X_DEALER_CODE = t0.DEALER_CODE
 WHERE t1.rn = 1;
+
+
+
+import pandas as pd
+import numpy as np
+
+# Assume df has columns: 'state', 'district', 'target' (where target == 1 means converted)
+# Example:
+# df = pd.DataFrame({
+#     'state': ['MH','MH','MH','DL','DL'],
+#     'district': ['Mumbai','Mumbai','Pune','New Delhi','New Delhi'],
+#     'target': [1,0,1,0,1]
+# })
+
+# 1) Aggregate at state, district
+agg = (
+    df.groupby(['state', 'district'], dropna=False)
+      .agg(
+          total_count=('target', 'size'),
+          converted_count=('target', lambda s: (s == 1).sum())
+      )
+      .sort_index()
+)
+
+# 2) Add conversion rate = converted / total
+agg['conversion_rate'] = np.where(
+    agg['total_count'] > 0,
+    agg['converted_count'] / agg['total_count'],
+    np.nan
+)
+
+# Optional: format conversion rate as percent string for display
+# agg['conversion_rate_pct'] = (agg['conversion_rate'] * 100).round(2).astype(str) + '%'
+
+# 3) If a pivot-like wide table is preferred (hierarchical rows already achieved by groupby)
+#    But if you truly want pivot_table usage:
+# pivot = pd.pivot_table(
+#     df,
+#     index=['state', 'district'],
+#     values='target',
+#     aggfunc=[len, lambda s: (s == 1).sum()],
+# ).rename(columns={'len': 'total_count', '<lambda_0>': 'converted_count'})
+# pivot['conversion_rate'] = pivot['converted_count'] / pivot['total_count']
+
+print(agg)
+
