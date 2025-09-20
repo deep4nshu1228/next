@@ -250,8 +250,8 @@ def create_yearwise_analysis_excel(csv_file_path, output_file_path):
     """
     Create year-wise analysis Excel file with three sheets:
     1. Overall basis (year-wise)
-    2. MODEL basis (model and month within each year)
-    3. MODEL_FAMILY basis (model family and month within each year)
+    2. MODEL basis (model and year combinations)
+    3. MODEL_FAMILY basis (model family and year combinations)
 
     Each sheet contains analysis of:
     - No of claims
@@ -283,12 +283,10 @@ def create_yearwise_analysis_excel(csv_file_path, output_file_path):
         print(f"Missing columns: {missing_columns}")
         return
 
-    # Parse WARRANTY_MONTH to extract year and month
+    # Parse WARRANTY_MONTH to extract year
     try:
         df['WARRANTY_MONTH'] = pd.to_datetime(df['WARRANTY_MONTH'])
         df['Year'] = df['WARRANTY_MONTH'].dt.year
-        df['Month'] = df['WARRANTY_MONTH'].dt.month
-        df['Month_Name'] = df['WARRANTY_MONTH'].dt.strftime('%B')
         print(f"\nYears in data: {sorted(df['Year'].unique())}")
         print(f"Date range: {df['WARRANTY_MONTH'].min()} to {df['WARRANTY_MONTH'].max()}")
     except Exception as e:
@@ -366,12 +364,12 @@ def create_yearwise_analysis_excel(csv_file_path, output_file_path):
         column_letter = get_column_letter(col_num)
         ws1.column_dimensions[column_letter].width = 20
 
-    # Sheet 2: MODEL Analysis (Model and Month within each year)
-    print("Creating Sheet 2: MODEL Analysis (with months)...")
+    # Sheet 2: MODEL Analysis (Model first, then Year)
+    print("Creating Sheet 2: MODEL Analysis (Model → Year)...")
     ws2 = wb.create_sheet("MODEL_Yearwise_Analysis")
 
     # Headers for model analysis
-    model_headers = ['Year', 'Model', 'Month', 'Total Claims', 'Total Vehicles in Warranty', 
+    model_headers = ['Model', 'Year', 'Total Claims', 'Total Vehicles in Warranty', 
                      'Total Warranty Cost', 'Claims Rate (Claims/Vehicles)', 
                      'Cost per Claim (Cost/Claims)', 'Combined Metric (Rate × Cost per Claim)']
 
@@ -379,46 +377,40 @@ def create_yearwise_analysis_excel(csv_file_path, output_file_path):
     for col_num, header in enumerate(model_headers, 1):
         ws2.cell(row=1, column=col_num, value=header)
 
-    # Analyze by year, model, and month
+    # Analyze by model first, then year
     row_num = 2
-    for year in sorted(df['Year'].unique()):
-        year_df = df[df['Year'] == year]
-        for model in sorted(year_df['MODEL'].unique()):
-            model_year_df = year_df[year_df['MODEL'] == model]
-            for month in sorted(model_year_df['Month'].unique()):
-                month_df = model_year_df[model_year_df['Month'] == month]
-                analysis = create_analysis_data(month_df)
-                month_name = month_df['Month_Name'].iloc[0]
+    for model in sorted(df['MODEL'].unique()):
+        model_df = df[df['MODEL'] == model]
+        for year in sorted(model_df['Year'].unique()):
+            model_year_df = model_df[model_df['Year'] == year]
+            analysis = create_analysis_data(model_year_df)
 
-                ws2.cell(row=row_num, column=1, value=int(year))
-                ws2.cell(row=row_num, column=2, value=model)
-                ws2.cell(row=row_num, column=3, value=month_name)
-                ws2.cell(row=row_num, column=4, value=analysis['Total_Claims'])
-                ws2.cell(row=row_num, column=5, value=analysis['Total_Vehicles_In_Warranty'])
-                ws2.cell(row=row_num, column=6, value=round(analysis['Total_Warranty_Cost'], 2))
-                ws2.cell(row=row_num, column=7, value=round(analysis['Claims_Rate'], 4))
-                ws2.cell(row=row_num, column=8, value=round(analysis['Cost_Per_Claim'], 2))
-                ws2.cell(row=row_num, column=9, value=round(analysis['Combined_Metric'], 4))
+            ws2.cell(row=row_num, column=1, value=model)
+            ws2.cell(row=row_num, column=2, value=int(year))
+            ws2.cell(row=row_num, column=3, value=analysis['Total_Claims'])
+            ws2.cell(row=row_num, column=4, value=analysis['Total_Vehicles_In_Warranty'])
+            ws2.cell(row=row_num, column=5, value=round(analysis['Total_Warranty_Cost'], 2))
+            ws2.cell(row=row_num, column=6, value=round(analysis['Claims_Rate'], 4))
+            ws2.cell(row=row_num, column=7, value=round(analysis['Cost_Per_Claim'], 2))
+            ws2.cell(row=row_num, column=8, value=round(analysis['Combined_Metric'], 4))
 
-                row_num += 1
+            row_num += 1
 
     # Format header and adjust columns
     format_header(ws2)
-    for col_num in range(1, 10):
+    for col_num in range(1, 9):
         column_letter = get_column_letter(col_num)
-        if col_num == 2:  # Model column
+        if col_num == 1:  # Model column
             ws2.column_dimensions[column_letter].width = 25
-        elif col_num == 3:  # Month column
-            ws2.column_dimensions[column_letter].width = 15
         else:
             ws2.column_dimensions[column_letter].width = 20
 
-    # Sheet 3: MODEL_FAMILY Analysis (Model Family and Month within each year)
-    print("Creating Sheet 3: MODEL_FAMILY Analysis (with months)...")
+    # Sheet 3: MODEL_FAMILY Analysis (Model Family first, then Year)
+    print("Creating Sheet 3: MODEL_FAMILY Analysis (Model Family → Year)...")
     ws3 = wb.create_sheet("MODEL_FAMILY_Yearwise_Analysis")
 
     # Headers for model family analysis
-    family_headers = ['Year', 'Model Family', 'Month', 'Total Claims', 'Total Vehicles in Warranty', 
+    family_headers = ['Model Family', 'Year', 'Total Claims', 'Total Vehicles in Warranty', 
                       'Total Warranty Cost', 'Claims Rate (Claims/Vehicles)', 
                       'Cost per Claim (Cost/Claims)', 'Combined Metric (Rate × Cost per Claim)']
 
@@ -426,37 +418,31 @@ def create_yearwise_analysis_excel(csv_file_path, output_file_path):
     for col_num, header in enumerate(family_headers, 1):
         ws3.cell(row=1, column=col_num, value=header)
 
-    # Analyze by year, model family, and month
+    # Analyze by model family first, then year
     row_num = 2
-    for year in sorted(df['Year'].unique()):
-        year_df = df[df['Year'] == year]
-        for model_family in sorted(year_df['MODEL_FAMILY'].unique()):
-            family_year_df = year_df[year_df['MODEL_FAMILY'] == model_family]
-            for month in sorted(family_year_df['Month'].unique()):
-                month_df = family_year_df[family_year_df['Month'] == month]
-                analysis = create_analysis_data(month_df)
-                month_name = month_df['Month_Name'].iloc[0]
+    for model_family in sorted(df['MODEL_FAMILY'].unique()):
+        family_df = df[df['MODEL_FAMILY'] == model_family]
+        for year in sorted(family_df['Year'].unique()):
+            family_year_df = family_df[family_df['Year'] == year]
+            analysis = create_analysis_data(family_year_df)
 
-                ws3.cell(row=row_num, column=1, value=int(year))
-                ws3.cell(row=row_num, column=2, value=model_family)
-                ws3.cell(row=row_num, column=3, value=month_name)
-                ws3.cell(row=row_num, column=4, value=analysis['Total_Claims'])
-                ws3.cell(row=row_num, column=5, value=analysis['Total_Vehicles_In_Warranty'])
-                ws3.cell(row=row_num, column=6, value=round(analysis['Total_Warranty_Cost'], 2))
-                ws3.cell(row=row_num, column=7, value=round(analysis['Claims_Rate'], 4))
-                ws3.cell(row=row_num, column=8, value=round(analysis['Cost_Per_Claim'], 2))
-                ws3.cell(row=row_num, column=9, value=round(analysis['Combined_Metric'], 4))
+            ws3.cell(row=row_num, column=1, value=model_family)
+            ws3.cell(row=row_num, column=2, value=int(year))
+            ws3.cell(row=row_num, column=3, value=analysis['Total_Claims'])
+            ws3.cell(row=row_num, column=4, value=analysis['Total_Vehicles_In_Warranty'])
+            ws3.cell(row=row_num, column=5, value=round(analysis['Total_Warranty_Cost'], 2))
+            ws3.cell(row=row_num, column=6, value=round(analysis['Claims_Rate'], 4))
+            ws3.cell(row=row_num, column=7, value=round(analysis['Cost_Per_Claim'], 2))
+            ws3.cell(row=row_num, column=8, value=round(analysis['Combined_Metric'], 4))
 
-                row_num += 1
+            row_num += 1
 
     # Format header and adjust columns
     format_header(ws3)
-    for col_num in range(1, 10):
+    for col_num in range(1, 9):
         column_letter = get_column_letter(col_num)
-        if col_num == 2:  # Model Family column
+        if col_num == 1:  # Model Family column
             ws3.column_dimensions[column_letter].width = 25
-        elif col_num == 3:  # Month column
-            ws3.column_dimensions[column_letter].width = 15
         else:
             ws3.column_dimensions[column_letter].width = 20
 
@@ -488,8 +474,8 @@ def create_yearwise_analysis_excel(csv_file_path, output_file_path):
                   f"${year_analysis['Total_Warranty_Cost']:,.2f} cost")
 
         print(f"\nSheet 1: {total_years} year summaries")
-        print(f"Sheet 2: {len(df.groupby(['Year', 'MODEL', 'Month']))} model-month combinations")
-        print(f"Sheet 3: {len(df.groupby(['Year', 'MODEL_FAMILY', 'Month']))} family-month combinations")
+        print(f"Sheet 2: {len(df.groupby(['MODEL', 'Year']))} model-year combinations")
+        print(f"Sheet 3: {len(df.groupby(['MODEL_FAMILY', 'Year']))} family-year combinations")
 
     except Exception as e:
         print(f"Error saving Excel file: {e}")
@@ -500,8 +486,8 @@ if __name__ == "__main__":
     print("="*50)
     print("This script will create a year-wise analysis Excel file with 3 sheets:")
     print("1. Overall Year-wise Analysis")
-    print("2. MODEL Year-wise Analysis (with months)")  
-    print("3. MODEL_FAMILY Year-wise Analysis (with months)")
+    print("2. MODEL Year-wise Analysis (Model → Year)")  
+    print("3. MODEL_FAMILY Year-wise Analysis (Model Family → Year)")
     print("\nEach sheet contains analysis of:")
     print("- Total Claims")
     print("- Total Vehicles in Warranty")
