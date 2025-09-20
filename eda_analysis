@@ -225,3 +225,244 @@ if __name__ == "__main__":
 
     # Run the analysis
     create_overall_analysis_excel(csv_file, excel_file)
+
+
+
+
+
+
+
+
+
+
+
+
+###################################### YEARLY
+
+
+import pandas as pd
+import numpy as np
+from openpyxl import Workbook
+from openpyxl.utils.dataframe import dataframe_to_rows
+from openpyxl.styles import Font, PatternFill, Alignment
+from openpyxl.utils import get_column_letter
+
+def create_overall_analysis_excel(csv_file_path, output_file_path):
+    """
+    Create overall analysis Excel file with three sheets:
+    1. Overall basis
+    2. MODEL basis  
+    3. MODEL_FAMILY basis
+
+    Each sheet contains analysis of:
+    - No of claims
+    - No of vehicles in warranty
+    - Warranty Cost
+    - Claims Rate (Claims/Vehicles)
+    - Cost per Claim (Cost/Claims)
+    - Combined Metric (Claims Rate * Cost per Claim)
+    """
+
+    # Read the CSV file
+    try:
+        df = pd.read_csv(csv_file_path)
+        print("Data loaded successfully!")
+        print(f"Shape: {df.shape}")
+        print(f"Columns: {list(df.columns)}")
+        print("\nFirst few rows:")
+        print(df.head())
+    except Exception as e:
+        print(f"Error reading CSV file: {e}")
+        return
+
+    # Validate required columns
+    required_columns = ['WARRANTY_MONTH', 'MODEL', 'MODEL_FAMILY', 'NO_OF_CLAIMS', 
+                       'NO_OF_VEHICLE_IN_WARRANTY', 'WARRANTY_COST']
+
+    missing_columns = [col for col in required_columns if col not in df.columns]
+    if missing_columns:
+        print(f"Missing columns: {missing_columns}")
+        return
+
+    # Create workbook
+    wb = Workbook()
+
+    # Remove default sheet
+    wb.remove(wb.active)
+
+    # Function to add header formatting
+    def format_header(ws, row_num=1):
+        for col_num in range(1, ws.max_column + 1):
+            cell = ws.cell(row=row_num, column=col_num)
+            cell.font = Font(bold=True, color='FFFFFF')
+            cell.fill = PatternFill(start_color='366092', end_color='366092', fill_type='solid')
+            cell.alignment = Alignment(horizontal='center', vertical='center')
+
+    # Function to create analysis dataframe
+    def create_analysis_df(group_df, group_name="Overall"):
+        analysis_data = {
+            'Metric': group_name,
+            'Total_Claims': group_df['NO_OF_CLAIMS'].sum(),
+            'Total_Vehicles_In_Warranty': group_df['NO_OF_VEHICLE_IN_WARRANTY'].sum(),
+            'Total_Warranty_Cost': group_df['WARRANTY_COST'].sum(),
+            'Claims_Rate': 0,
+            'Cost_Per_Claim': 0,
+            'Combined_Metric': 0
+        }
+
+        # Calculate ratios
+        if analysis_data['Total_Vehicles_In_Warranty'] > 0:
+            analysis_data['Claims_Rate'] = analysis_data['Total_Claims'] / analysis_data['Total_Vehicles_In_Warranty']
+
+        if analysis_data['Total_Claims'] > 0:
+            analysis_data['Cost_Per_Claim'] = analysis_data['Total_Warranty_Cost'] / analysis_data['Total_Claims']
+
+        analysis_data['Combined_Metric'] = analysis_data['Claims_Rate'] * analysis_data['Cost_Per_Claim']
+
+        return analysis_data
+
+    # Sheet 1: Overall Analysis
+    print("\nCreating Sheet 1: Overall Analysis...")
+    ws1 = wb.create_sheet("Overall_Analysis")
+
+    overall_analysis = create_analysis_df(df, "Total")
+
+    # Create DataFrame for overall analysis
+    overall_df = pd.DataFrame([overall_analysis])
+
+    # Add column headers
+    headers = ['Metric', 'Total Claims', 'Total Vehicles in Warranty', 'Total Warranty Cost',
+               'Claims Rate (Claims/Vehicles)', 'Cost per Claim (Cost/Claims)', 
+               'Combined Metric (Rate × Cost per Claim)']
+
+    # Write headers
+    for col_num, header in enumerate(headers, 1):
+        ws1.cell(row=1, column=col_num, value=header)
+
+    # Write data
+    ws1.cell(row=2, column=1, value="Overall")
+    ws1.cell(row=2, column=2, value=overall_analysis['Total_Claims'])
+    ws1.cell(row=2, column=3, value=overall_analysis['Total_Vehicles_In_Warranty'])
+    ws1.cell(row=2, column=4, value=round(overall_analysis['Total_Warranty_Cost'], 2))
+    ws1.cell(row=2, column=5, value=round(overall_analysis['Claims_Rate'], 4))
+    ws1.cell(row=2, column=6, value=round(overall_analysis['Cost_Per_Claim'], 2))
+    ws1.cell(row=2, column=7, value=round(overall_analysis['Combined_Metric'], 4))
+
+    # Format header
+    format_header(ws1)
+
+    # Auto-adjust column widths
+    for col_num in range(1, 8):
+        column_letter = get_column_letter(col_num)
+        ws1.column_dimensions[column_letter].width = 20
+
+    # Sheet 2: MODEL Analysis
+    print("Creating Sheet 2: MODEL Analysis...")
+    ws2 = wb.create_sheet("MODEL_Analysis")
+
+    model_analysis = []
+    for model in sorted(df['MODEL'].unique()):
+        model_df = df[df['MODEL'] == model]
+        analysis = create_analysis_df(model_df, model)
+        model_analysis.append(analysis)
+
+    # Write headers
+    for col_num, header in enumerate(headers, 1):
+        ws2.cell(row=1, column=col_num, value=header)
+
+    # Write data
+    for row_num, analysis in enumerate(model_analysis, 2):
+        ws2.cell(row=row_num, column=1, value=analysis['Metric'])
+        ws2.cell(row=row_num, column=2, value=analysis['Total_Claims'])
+        ws2.cell(row=row_num, column=3, value=analysis['Total_Vehicles_In_Warranty'])
+        ws2.cell(row=row_num, column=4, value=round(analysis['Total_Warranty_Cost'], 2))
+        ws2.cell(row=row_num, column=5, value=round(analysis['Claims_Rate'], 4))
+        ws2.cell(row=row_num, column=6, value=round(analysis['Cost_Per_Claim'], 2))
+        ws2.cell(row=row_num, column=7, value=round(analysis['Combined_Metric'], 4))
+
+    # Format header
+    format_header(ws2)
+
+    # Auto-adjust column widths
+    for col_num in range(1, 8):
+        column_letter = get_column_letter(col_num)
+        ws2.column_dimensions[column_letter].width = 20
+
+    # Sheet 3: MODEL_FAMILY Analysis
+    print("Creating Sheet 3: MODEL_FAMILY Analysis...")
+    ws3 = wb.create_sheet("MODEL_FAMILY_Analysis")
+
+    model_family_analysis = []
+    for model_family in sorted(df['MODEL_FAMILY'].unique()):
+        family_df = df[df['MODEL_FAMILY'] == model_family]
+        analysis = create_analysis_df(family_df, model_family)
+        model_family_analysis.append(analysis)
+
+    # Write headers
+    for col_num, header in enumerate(headers, 1):
+        ws3.cell(row=1, column=col_num, value=header)
+
+    # Write data
+    for row_num, analysis in enumerate(model_family_analysis, 2):
+        ws3.cell(row=row_num, column=1, value=analysis['Metric'])
+        ws3.cell(row=row_num, column=2, value=analysis['Total_Claims'])
+        ws3.cell(row=row_num, column=3, value=analysis['Total_Vehicles_In_Warranty'])
+        ws3.cell(row=row_num, column=4, value=round(analysis['Total_Warranty_Cost'], 2))
+        ws3.cell(row=row_num, column=5, value=round(analysis['Claims_Rate'], 4))
+        ws3.cell(row=row_num, column=6, value=round(analysis['Cost_Per_Claim'], 2))
+        ws3.cell(row=row_num, column=7, value=round(analysis['Combined_Metric'], 4))
+
+    # Format header
+    format_header(ws3)
+
+    # Auto-adjust column widths
+    for col_num in range(1, 8):
+        column_letter = get_column_letter(col_num)
+        ws3.column_dimensions[column_letter].width = 20
+
+    # Save the workbook
+    try:
+        wb.save(output_file_path)
+        print(f"\nExcel file saved successfully: {output_file_path}")
+
+        # Print summary statistics
+        print("\n" + "="*60)
+        print("ANALYSIS SUMMARY")
+        print("="*60)
+        print(f"Overall Analysis:")
+        print(f"  Total Claims: {overall_analysis['Total_Claims']:,}")
+        print(f"  Total Vehicles in Warranty: {overall_analysis['Total_Vehicles_In_Warranty']:,}")
+        print(f"  Total Warranty Cost: ${overall_analysis['Total_Warranty_Cost']:,.2f}")
+        print(f"  Claims Rate: {overall_analysis['Claims_Rate']:.4f}")
+        print(f"  Cost per Claim: ${overall_analysis['Cost_Per_Claim']:,.2f}")
+        print(f"  Combined Metric: {overall_analysis['Combined_Metric']:.4f}")
+
+        print(f"\nNumber of Models: {len(model_analysis)}")
+        print(f"Number of Model Families: {len(model_family_analysis)}")
+
+    except Exception as e:
+        print(f"Error saving Excel file: {e}")
+
+# Main execution
+if __name__ == "__main__":
+    print("Warranty Data Analysis Script")
+    print("="*50)
+    print("This script will create an overall analysis Excel file with 3 sheets:")
+    print("1. Overall Analysis")
+    print("2. MODEL Analysis")  
+    print("3. MODEL_FAMILY Analysis")
+    print("\nEach sheet contains analysis of:")
+    print("- Total Claims")
+    print("- Total Vehicles in Warranty")
+    print("- Total Warranty Cost")
+    print("- Claims Rate (Claims/Vehicles)")
+    print("- Cost per Claim (Cost/Claims)")
+    print("- Combined Metric (Rate × Cost per Claim)")
+    print("\n" + "="*50)
+
+    # Example usage - UPDATE THESE FILE PATHS:
+    csv_file = 'warranty_data.csv'  # Replace with your CSV file path
+    excel_file = 'overall_analysis.xlsx'  # Replace with your desired output path
+
+    # Run the analysis
+    create_overall_analysis_excel(csv_file, excel_file)
