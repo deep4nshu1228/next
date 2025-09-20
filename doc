@@ -1,0 +1,34 @@
+Hi Nishant,
+
+I have prepared the historical warranty cost data starting from January 2020 onwards. Since we have dispatch data available from January 2015 (i.e., 60 months prior to January 2020), this ensures we capture the correct set of vehicles under warranty.
+
+The data has been structured at three levels:
+
+Overall – January 2020 to August 2025
+
+Year-wise – 2020 to 2025 (note: only 8 months of data are available for 2025)
+
+Month-wise – January 2020 to August 2025
+
+Each of the above levels is further broken down into:
+a. Overall
+b. Model-wise
+c. Model Family-wise
+
+For every cut of the data, I have included the following metrics:
+
+Number of records where warranty was claimed
+
+Total number of vehicles in warranty
+
+Actual warranty cost
+
+Based on these, I have derived three calculated columns:
+
+Warranty incidence rate = (Number of records where warranty was claimed ÷ Total vehicles in warranty)
+
+Average cost per claim = (Warranty cost ÷ Number of records where warranty was claimed)
+
+Estimated warranty cost per vehicle = (Incidence rate × Average cost per claim)
+
+Please let me know if you’d like me to walk you through the data or provide further breakdowns.
