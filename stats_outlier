@@ -429,7 +429,7 @@ def create_comprehensive_report():
         bottom_cost_models.to_excel(writer, sheet_name='Bottom_Cost_Models', index=False)
         
         # Format model ranking sheets
-        for sheet_name in ['Top_Cost_Models', 'Bottom_Cost_Models']:
+        for sheet_name, data in [('Top_Cost_Models', top_cost_models), ('Bottom_Cost_Models', bottom_cost_models)]:
             sheet = writer.sheets[sheet_name]
             sheet.set_row(0, None, header_format)
             sheet.set_column('A:A', 25)  # Model names
@@ -438,9 +438,8 @@ def create_comprehensive_report():
             sheet.set_column('D:D', 12, decimal_format)   # Percentile
             sheet.set_column('E:F', 15, currency_format)  # vs Mean, vs Median
             
-            # Color code based on Z-scores
-            for row_idx in range(1, len(top_cost_models) + 1):
-                z_score = float(sheet.cell(row_idx, 2).value) if sheet.cell(row_idx, 2).value else 0
+            # Color code based on Z-scores - FIXED VERSION
+            for row_idx, z_score in enumerate(data['Z_Score'], start=1):
                 if abs(z_score) > 3:
                     sheet.set_row(row_idx, None, critical_format)
                 elif abs(z_score) > 2:
@@ -457,7 +456,7 @@ def create_comprehensive_report():
         bottom_cost_families.to_excel(writer, sheet_name='Bottom_Cost_Families', index=False)
         
         # Format family ranking sheets
-        for sheet_name in ['Top_Cost_Families', 'Bottom_Cost_Families']:
+        for sheet_name, data in [('Top_Cost_Families', top_cost_families), ('Bottom_Cost_Families', bottom_cost_families)]:
             sheet = writer.sheets[sheet_name]
             sheet.set_row(0, None, header_format)
             sheet.set_column('A:A', 25)  # Family names
@@ -466,9 +465,8 @@ def create_comprehensive_report():
             sheet.set_column('D:D', 12, decimal_format)   # Percentile
             sheet.set_column('E:F', 15, currency_format)  # vs Mean, vs Median
             
-            # Color code based on Z-scores
-            for row_idx in range(1, len(top_cost_families) + 1):
-                z_score = float(sheet.cell(row_idx, 2).value) if sheet.cell(row_idx, 2).value else 0
+            # Color code based on Z-scores - FIXED VERSION
+            for row_idx, z_score in enumerate(data['Z_Score'], start=1):
                 if abs(z_score) > 3:
                     sheet.set_row(row_idx, None, critical_format)
                 elif abs(z_score) > 2:
@@ -483,39 +481,34 @@ def create_comprehensive_report():
 create_comprehensive_report()
 
 print(f"""
-🚀 ENHANCED BUSINESS ANALYSIS CREATED: {output_file}
+✅ FIXED & ENHANCED BUSINESS ANALYSIS CREATED: {output_file}
 
-📋 ACTIONABLE INSIGHTS SHEETS:
-1. Executive_Action_Plan   - Strategic roadmap with priorities & timelines
-2. Model_Action_Items     - Model-specific recommendations with savings estimates  
+🔧 ERROR FIXED:
+• Removed invalid .cell() method calls
+• Fixed color coding logic for Z-score based formatting
+
+📋 COMPLETE SHEET LIST:
+1. Executive_Action_Plan   - Strategic roadmap with priorities
+2. Model_Action_Items     - Model-specific recommendations  
 3. Family_Strategy        - Family-level strategic initiatives
-
-📈 STATISTICAL ANALYSIS SHEETS:
-4. Model_Statistics       - Complete Z-scores & percentiles for all models
-5. Family_Statistics      - Complete Z-scores & percentiles for all families
+4. Model_Statistics       - Complete statistical analysis for all models
+5. Family_Statistics      - Complete statistical analysis for all families
 6. Model_Summary         - Statistical overview of model metrics
 7. Family_Summary        - Statistical overview of family metrics
+8. Top_Cost_Models       - 10 highest cost models with Z-scores
+9. Bottom_Cost_Models    - 10 lowest cost models with Z-scores
+10. Top_Cost_Families    - 10 highest cost families with Z-scores
+11. Bottom_Cost_Families - 10 lowest cost families with Z-scores
 
-🏆 ENHANCED RANKING SHEETS (NEW WITH Z-SCORES):
-8. Top_Cost_Models       - 10 highest cost models with Z-scores & analysis
-9. Bottom_Cost_Models    - 10 lowest cost models with Z-scores & benchmarks
-10. Top_Cost_Families    - 10 highest cost families with Z-scores & analysis  
-11. Bottom_Cost_Families - 10 lowest cost families with Z-scores & benchmarks
+🎨 COLOR CODING (WORKING):
+• Red: |Z-score| > 3 (Critical outliers requiring immediate action)
+• Orange: |Z-score| > 2 (High outliers needing investigation)  
+• Yellow: |Z-score| > 1 (Medium outliers for monitoring)
+• No color: Normal range
 
-🎯 NEW FEATURES IN RANKING SHEETS:
-• Z-Scores for statistical significance
-• Percentile rankings
-• Difference vs Mean & Median
-• Color coding by Z-score severity:
-  - Red: |Z-score| > 3 (Critical outliers)
-  - Orange: |Z-score| > 2 (High outliers)  
-  - Yellow: |Z-score| > 1 (Medium outliers)
-• Additional cost metrics for context
-• Volume data for business impact assessment
-
-💼 BUSINESS VALUE:
-• Family-wise cost comparison for strategic decisions
-• Statistical significance of cost differences
-• Benchmark identification at both model & family levels
-• Clear priorities for cost optimization initiatives
+💼 READY FOR BUSINESS USE:
+• Complete statistical analysis with proper Z-score calculations
+• Family-wise AND model-wise cost comparisons
+• Actionable insights with clear priorities and timelines
+• Benchmark identification for best practice sharing
 """)
