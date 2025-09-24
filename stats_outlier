@@ -6,73 +6,116 @@ import xlsxwriter
 
 # --- CONFIG ---
 excel_path = "your_warranty.xlsx"
-output_file = f"Warranty_Outlier_Analysis_{datetime.now().strftime('%Y%m%d')}.xlsx"
+output_file = f"Warranty_Complete_Analysis_{datetime.now().strftime('%Y%m%d')}.xlsx"
 
 # Load and prepare data
 model_df = pd.read_excel(excel_path, sheet_name="MODEL_Analysis")
 family_df = pd.read_excel(excel_path, sheet_name="MODEL_FAMILY_Analysis")
 
-# Column definitions - REMOVED Total Warranty Cost
+# Column definitions
 cost_per_claim_col = "Cost per Claim (Cost / Number of Warranty Claims)."
 combined_metric_col = "Combined Metric (Rate * Cost per Claim)"
 claim_rate_col = "Claims Rate (Number of Warranty Claims / Total Vehicles in Warranty)"
+num_records_col = "Number of Records Where Warranty Came In"
+vehicles_col = "Total Vehicles in Warranty"
 
-# Updated column name with space
-family_col = "Model Family"  # Changed from "Model_family"
+family_col = "Model Family"
 
 # --- ANALYSIS FUNCTIONS ---
 def clean_numeric(series):
     return pd.to_numeric(series.astype(str).str.replace(",", "").str.replace("₹", "").str.strip(), errors="coerce")
 
-def detect_outliers_comprehensive(df, column, model_col):
-    clean_values = clean_numeric(df[column])
+def comprehensive_statistical_analysis(df, group_col, analysis_columns):
+    """Generate complete statistical analysis for all models/families"""
     
-    # Z-score method
-    z_scores = np.abs(stats.zscore(clean_values, nan_policy='omit'))
+    # First, get overall statistics for all metrics
+    overall_stats = {}
+    for col in analysis_columns:
+        if col in df.columns:
+            clean_values = clean_numeric(df[col])
+            overall_stats[col] = {
+                'mean': clean_values.mean(),
+                'std': clean_values.std(),
+                'median': clean_values.median(),
+                'q1': clean_values.quantile(0.25),
+                'q3': clean_values.quantile(0.75),
+                'min': clean_values.min(),
+                'max': clean_values.max()
+            }
     
-    # IQR method
-    Q1 = clean_values.quantile(0.25)
-    Q3 = clean_values.quantile(0.75)
-    IQR = Q3 - Q1
-    lower_bound = Q1 - 1.5 * IQR
-    upper_bound = Q3 + 1.5 * IQR
+    # Now analyze each group (model/family)
+    detailed_analysis = []
     
-    # Combine results
-    outlier_analysis = df.copy()
-    outlier_analysis[f'{column}_clean'] = clean_values
-    outlier_analysis[f'Z_Score'] = z_scores
-    outlier_analysis[f'Is_Z_Outlier'] = z_scores > 2
-    outlier_analysis[f'Is_Extreme_Outlier'] = z_scores > 3
-    outlier_analysis[f'Is_IQR_Outlier'] = (clean_values < lower_bound) | (clean_values > upper_bound)
-    outlier_analysis[f'Risk_Level'] = 'Normal'
+    for group_name in df[group_col].unique():
+        if pd.isna(group_name):
+            continue
+            
+        group_data = df[df[group_col] == group_name]
+        
+        row = {group_col: group_name}
+        
+        for col in analysis_columns:
+            if col in df.columns:
+                value = clean_numeric(group_data[col]).iloc[0] if len(group_data) > 0 else np.nan
+                
+                if not pd.isna(value) and col in overall_stats:
+                    # Calculate Z-score
+                    z_score = (value - overall_stats[col]['mean']) / overall_stats[col]['std']
+                    
+                    # Calculate percentile rank
+                    all_values = clean_numeric(df[col]).dropna()
+                    percentile = stats.percentileofscore(all_values, value)
+                    
+                    # Determine risk category
+                    abs_z = abs(z_score)
+                    if abs_z > 3:
+                        risk_level = "Critical Risk"
+                    elif abs_z > 2:
+                        risk_level = "High Risk"  
+                    elif abs_z > 1:
+                        risk_level = "Medium Risk"
+                    else:
+                        risk_level = "Normal"
+                    
+                    # Clean column name for output
+                    clean_col_name = col.replace('(Cost / Number of Warranty Claims).', '').replace('(Rate * Cost per Claim)', '').strip()
+                    
+                    # Add detailed metrics
+                    row[f'{clean_col_name}_Value'] = value
+                    row[f'{clean_col_name}_Z_Score'] = z_score
+                    row[f'{clean_col_name}_Percentile'] = percentile
+                    row[f'{clean_col_name}_vs_Mean'] = value - overall_stats[col]['mean']
+                    row[f'{clean_col_name}_vs_Median'] = value - overall_stats[col]['median']
+                    row[f'{clean_col_name}_Risk_Level'] = risk_level
+                    
+        detailed_analysis.append(row)
     
-    # Assign risk levels
-    outlier_analysis.loc[outlier_analysis[f'Is_Z_Outlier'], f'Risk_Level'] = 'Medium Risk'
-    outlier_analysis.loc[outlier_analysis[f'Is_Extreme_Outlier'], f'Risk_Level'] = 'High Risk'
-    outlier_analysis.loc[outlier_analysis[f'Is_IQR_Outlier'] & outlier_analysis[f'Is_Z_Outlier'], f'Risk_Level'] = 'Critical Risk'
+    detailed_df = pd.DataFrame(detailed_analysis)
     
-    return outlier_analysis
+    # Create summary statistics table
+    summary_stats = []
+    for col in analysis_columns:
+        if col in df.columns and col in overall_stats:
+            clean_col_name = col.replace('(Cost / Number of Warranty Claims).', '').replace('(Rate * Cost per Claim)', '').strip()
+            summary_stats.append({
+                'Metric': clean_col_name,
+                'Mean': overall_stats[col]['mean'],
+                'Std_Dev': overall_stats[col]['std'],
+                'CV_Percent': (overall_stats[col]['std'] / overall_stats[col]['mean']) * 100,
+                'Median': overall_stats[col]['median'],
+                'Q1': overall_stats[col]['q1'],
+                'Q3': overall_stats[col]['q3'],
+                'Min': overall_stats[col]['min'],
+                'Max': overall_stats[col]['max'],
+                'Range': overall_stats[col]['max'] - overall_stats[col]['min']
+            })
+    
+    summary_df = pd.DataFrame(summary_stats)
+    
+    return detailed_df, summary_df
 
-def generate_summary_stats(df, column):
-    clean_values = clean_numeric(df[column])
-    return {
-        'Total_Models': len(df),
-        'Valid_Records': clean_values.count(),
-        'Mean': clean_values.mean(),
-        'Median': clean_values.median(),
-        'Std_Dev': clean_values.std(),
-        'CV_Percent': (clean_values.std() / clean_values.mean()) * 100 if clean_values.mean() != 0 else 0,
-        'Min': clean_values.min(),
-        'Max': clean_values.max(),
-        'Q1': clean_values.quantile(0.25),
-        'Q3': clean_values.quantile(0.75),
-        'Outliers_Count_Z': (np.abs(stats.zscore(clean_values, nan_policy='omit')) > 2).sum(),
-        'Critical_Outliers_Count': (np.abs(stats.zscore(clean_values, nan_policy='omit')) > 3).sum()
-    }
-
-# --- GENERATE BUSINESS REPORT ---
-def create_business_report():
-    # Create Excel writer with xlsxwriter engine
+# --- GENERATE COMPREHENSIVE REPORT ---
+def create_comprehensive_report():
     writer = pd.ExcelWriter(output_file, engine='xlsxwriter')
     workbook = writer.book
     
@@ -86,212 +129,192 @@ def create_business_report():
         'border': 1
     })
     
-    critical_format = workbook.add_format({
-        'bg_color': '#FF6B6B',
-        'font_color': 'white',
-        'bold': True
-    })
+    critical_format = workbook.add_format({'bg_color': '#FF6B6B', 'font_color': 'white', 'bold': True})
+    high_risk_format = workbook.add_format({'bg_color': '#FFB347', 'font_color': 'black'})
+    medium_risk_format = workbook.add_format({'bg_color': '#FFEB9C', 'font_color': 'black'})
+    good_format = workbook.add_format({'bg_color': '#90EE90', 'font_color': 'black'})
     
-    high_risk_format = workbook.add_format({
-        'bg_color': '#FFB347',
-        'font_color': 'black'
-    })
+    currency_format = workbook.add_format({'num_format': '#,##0.00', 'align': 'right'})
+    percentage_format = workbook.add_format({'num_format': '0.00%', 'align': 'right'})
+    decimal_format = workbook.add_format({'num_format': '0.00', 'align': 'right'})
     
-    medium_risk_format = workbook.add_format({
-        'bg_color': '#FFEB9C',
-        'font_color': 'black'
-    })
+    # Analysis columns
+    analysis_columns = [cost_per_claim_col, combined_metric_col, claim_rate_col]
     
-    currency_format = workbook.add_format({
-        'num_format': '#,##0.00',
-        'align': 'right'
-    })
+    # 1. MODEL COMPLETE ANALYSIS
+    model_detailed, model_summary = comprehensive_statistical_analysis(model_df, 'Model', analysis_columns)
     
-    percentage_format = workbook.add_format({
-        'num_format': '0.00%',
-        'align': 'right'
-    })
+    # Save model detailed analysis
+    model_detailed.to_excel(writer, sheet_name='All_Models_Analysis', index=False)
+    model_sheet = writer.sheets['All_Models_Analysis']
+    model_sheet.set_row(0, None, header_format)
     
-    # 1. EXECUTIVE SUMMARY SHEET
-    exec_summary_data = []
+    # Format columns and apply conditional formatting
+    model_sheet.set_column('A:A', 25)  # Model names
+    col_idx = 1
     
-    # Only analyze Cost per Claim and Combined Metric (removed Total Warranty Cost)
-    analysis_columns = [cost_per_claim_col, combined_metric_col]
-    
-    for sheet_name, df, group_col in [('Models', model_df, 'Model'), ('Families', family_df, family_col)]:
-        for col in analysis_columns:
-            if col in df.columns:
-                stats_dict = generate_summary_stats(df, col)
-                exec_summary_data.append({
-                    'Analysis_Type': sheet_name,
-                    'Metric': col.replace('(Cost / Number of Warranty Claims).', '').replace('(Rate * Cost per Claim)', ''),
-                    'Total_Items': stats_dict['Total_Models'],
-                    'Mean': stats_dict['Mean'],
-                    'Std_Dev': stats_dict['Std_Dev'],
-                    'CV_Percent': stats_dict['CV_Percent'],
-                    'Outliers_Medium_Risk': stats_dict['Outliers_Count_Z'],
-                    'Outliers_Critical_Risk': stats_dict['Critical_Outliers_Count'],
-                    'Risk_Assessment': 'High Variability' if stats_dict['CV_Percent'] > 30 else 'Moderate Variability' if stats_dict['CV_Percent'] > 15 else 'Low Variability'
-                })
-    
-    exec_df = pd.DataFrame(exec_summary_data)
-    exec_df.to_excel(writer, sheet_name='Executive_Summary', index=False)
-    
-    # Format executive summary
-    exec_sheet = writer.sheets['Executive_Summary']
-    exec_sheet.set_row(0, None, header_format)
-    exec_sheet.set_column('A:A', 15)
-    exec_sheet.set_column('B:B', 25)
-    exec_sheet.set_column('C:C', 12)
-    exec_sheet.set_column('D:F', 15, currency_format)
-    exec_sheet.set_column('G:H', 18)
-    exec_sheet.set_column('I:I', 20)
-    
-    # 2. MODEL OUTLIER ANALYSIS SHEET
-    model_outlier_data = []
-    
-    for col in analysis_columns:  # Only Cost per Claim and Combined Metric
-        if col in model_df.columns:
-            analysis = detect_outliers_comprehensive(model_df, col, 'Model')
-            outliers = analysis[analysis['Risk_Level'] != 'Normal'].copy()
-            
-            if not outliers.empty:
-                outliers['Metric_Type'] = col.replace('(Cost / Number of Warranty Claims).', 'Cost per Claim').replace('(Rate * Cost per Claim)', 'Combined Metric')
-                outliers_subset = outliers[['Model', 'Metric_Type', f'{col}_clean', 'Z_Score', 'Risk_Level']].copy()
-                outliers_subset.columns = ['Model', 'Metric_Type', 'Value', 'Z_Score', 'Risk_Level']
-                model_outlier_data.append(outliers_subset)
-    
-    if model_outlier_data:
-        model_outliers_df = pd.concat(model_outlier_data, ignore_index=True)
-        model_outliers_df = model_outliers_df.sort_values(['Risk_Level', 'Z_Score'], ascending=[False, False])
-        model_outliers_df.to_excel(writer, sheet_name='Model_Outliers', index=False)
+    for metric in ['Cost per Claim', 'Combined Metric', 'Claims Rate']:
+        # Value columns
+        model_sheet.set_column(col_idx, col_idx, 15, currency_format if 'Cost' in metric else decimal_format)
+        col_idx += 1
         
-        # Format model outliers sheet
-        model_sheet = writer.sheets['Model_Outliers']
-        model_sheet.set_row(0, None, header_format)
-        model_sheet.set_column('A:A', 20)
-        model_sheet.set_column('B:B', 20)
-        model_sheet.set_column('C:C', 15, currency_format)
-        model_sheet.set_column('D:D', 12)
-        model_sheet.set_column('E:E', 15)
+        # Z-score columns
+        model_sheet.set_column(col_idx, col_idx, 12, decimal_format)
+        col_idx += 1
         
-        # Apply conditional formatting based on risk level
-        for row_idx, risk_level in enumerate(model_outliers_df['Risk_Level'], start=1):
-            if risk_level == 'Critical Risk':
-                model_sheet.set_row(row_idx, None, critical_format)
-            elif risk_level == 'High Risk':
-                model_sheet.set_row(row_idx, None, high_risk_format)
-            elif risk_level == 'Medium Risk':
-                model_sheet.set_row(row_idx, None, medium_risk_format)
-    
-    # 3. FAMILY OUTLIER ANALYSIS SHEET
-    family_outlier_data = []
-    
-    for col in analysis_columns:  # Only Cost per Claim and Combined Metric
-        if col in family_df.columns:
-            analysis = detect_outliers_comprehensive(family_df, col, family_col)
-            outliers = analysis[analysis['Risk_Level'] != 'Normal'].copy()
-            
-            if not outliers.empty:
-                outliers['Metric_Type'] = col.replace('(Cost / Number of Warranty Claims).', 'Cost per Claim').replace('(Rate * Cost per Claim)', 'Combined Metric')
-                outliers_subset = outliers[[family_col, 'Metric_Type', f'{col}_clean', 'Z_Score', 'Risk_Level']].copy()
-                outliers_subset.columns = ['Model_Family', 'Metric_Type', 'Value', 'Z_Score', 'Risk_Level']
-                family_outlier_data.append(outliers_subset)
-    
-    if family_outlier_data:
-        family_outliers_df = pd.concat(family_outlier_data, ignore_index=True)
-        family_outliers_df = family_outliers_df.sort_values(['Risk_Level', 'Z_Score'], ascending=[False, False])
-        family_outliers_df.to_excel(writer, sheet_name='Family_Outliers', index=False)
+        # Percentile columns  
+        model_sheet.set_column(col_idx, col_idx, 12, decimal_format)
+        col_idx += 1
         
-        # Format family outliers sheet
-        family_sheet = writer.sheets['Family_Outliers']
-        family_sheet.set_row(0, None, header_format)
-        family_sheet.set_column('A:A', 20)
-        family_sheet.set_column('B:B', 20)
-        family_sheet.set_column('C:C', 15, currency_format)
-        family_sheet.set_column('D:D', 12)
-        family_sheet.set_column('E:E', 15)
+        # vs Mean columns
+        model_sheet.set_column(col_idx, col_idx, 15, currency_format if 'Cost' in metric else decimal_format)
+        col_idx += 1
         
-        for row_idx, risk_level in enumerate(family_outliers_df['Risk_Level'], start=1):
-            if risk_level == 'Critical Risk':
-                family_sheet.set_row(row_idx, None, critical_format)
-            elif risk_level == 'High Risk':
-                family_sheet.set_row(row_idx, None, high_risk_format)
-            elif risk_level == 'Medium Risk':
-                family_sheet.set_row(row_idx, None, medium_risk_format)
+        # vs Median columns
+        model_sheet.set_column(col_idx, col_idx, 15, currency_format if 'Cost' in metric else decimal_format)
+        col_idx += 1
+        
+        # Risk level columns
+        model_sheet.set_column(col_idx, col_idx, 15)
+        col_idx += 1
     
-    # 4. COMPLETE MODEL DATA SHEET
-    model_complete = model_df.copy()
-    for col in analysis_columns:  # Only Cost per Claim and Combined Metric
-        if col in model_df.columns:
-            model_complete[f'{col}_clean'] = clean_numeric(model_df[col])
+    # Apply conditional formatting to risk level columns
+    for row_idx in range(1, len(model_detailed) + 1):
+        for metric in ['Cost per Claim', 'Combined Metric', 'Claims Rate']:
+            risk_col = f'{metric}_Risk_Level'
+            if risk_col in model_detailed.columns:
+                risk_value = model_detailed.iloc[row_idx - 1][risk_col]
+                col_letter = chr(ord('A') + list(model_detailed.columns).index(risk_col))
+                
+                if risk_value == 'Critical Risk':
+                    model_sheet.write(f'{col_letter}{row_idx + 1}', risk_value, critical_format)
+                elif risk_value == 'High Risk':
+                    model_sheet.write(f'{col_letter}{row_idx + 1}', risk_value, high_risk_format)
+                elif risk_value == 'Medium Risk':
+                    model_sheet.write(f'{col_letter}{row_idx + 1}', risk_value, medium_risk_format)
+                else:
+                    model_sheet.write(f'{col_letter}{row_idx + 1}', risk_value, good_format)
     
-    model_complete.to_excel(writer, sheet_name='All_Models_Data', index=False)
-    complete_sheet = writer.sheets['All_Models_Data']
-    complete_sheet.set_row(0, None, header_format)
+    # 2. FAMILY COMPLETE ANALYSIS
+    family_detailed, family_summary = comprehensive_statistical_analysis(family_df, family_col, analysis_columns)
     
-    # 5. RECOMMENDATIONS SHEET
-    recommendations = pd.DataFrame([
-        {'Priority': 'Critical', 'Action': 'Immediate Investigation Required', 
-         'Description': 'Models/families with Z-score > 3 and IQR outliers need urgent review of cost drivers'},
-        {'Priority': 'High', 'Action': 'Deep Dive Cost Analysis', 
-         'Description': 'Models with Z-score > 3 require detailed cost per claim investigation'},
-        {'Priority': 'Medium', 'Action': 'Monitor Combined Metrics', 
-         'Description': 'Models with Z-score > 2 should be monitored for claim rate and cost trends'},
-        {'Priority': 'Low', 'Action': 'Best Practice Benchmarking', 
-         'Description': 'Compare normal-range models for cost optimization opportunities'}
+    # Save family detailed analysis
+    family_detailed.to_excel(writer, sheet_name='All_Families_Analysis', index=False)
+    family_sheet = writer.sheets['All_Families_Analysis']
+    family_sheet.set_row(0, None, header_format)
+    
+    # Format family sheet similar to model sheet
+    family_sheet.set_column('A:A', 25)
+    col_idx = 1
+    
+    for metric in ['Cost per Claim', 'Combined Metric', 'Claims Rate']:
+        family_sheet.set_column(col_idx, col_idx, 15, currency_format if 'Cost' in metric else decimal_format)
+        family_sheet.set_column(col_idx + 1, col_idx + 1, 12, decimal_format)  # Z-score
+        family_sheet.set_column(col_idx + 2, col_idx + 2, 12, decimal_format)  # Percentile
+        family_sheet.set_column(col_idx + 3, col_idx + 3, 15, currency_format if 'Cost' in metric else decimal_format)  # vs Mean
+        family_sheet.set_column(col_idx + 4, col_idx + 4, 15, currency_format if 'Cost' in metric else decimal_format)  # vs Median
+        family_sheet.set_column(col_idx + 5, col_idx + 5, 15)  # Risk Level
+        col_idx += 6
+    
+    # Apply conditional formatting to family risk levels
+    for row_idx in range(1, len(family_detailed) + 1):
+        for metric in ['Cost per Claim', 'Combined Metric', 'Claims Rate']:
+            risk_col = f'{metric}_Risk_Level'
+            if risk_col in family_detailed.columns:
+                risk_value = family_detailed.iloc[row_idx - 1][risk_col]
+                col_letter = chr(ord('A') + list(family_detailed.columns).index(risk_col))
+                
+                if risk_value == 'Critical Risk':
+                    family_sheet.write(f'{col_letter}{row_idx + 1}', risk_value, critical_format)
+                elif risk_value == 'High Risk':
+                    family_sheet.write(f'{col_letter}{row_idx + 1}', risk_value, high_risk_format)
+                elif risk_value == 'Medium Risk':
+                    family_sheet.write(f'{col_letter}{row_idx + 1}', risk_value, medium_risk_format)
+                else:
+                    family_sheet.write(f'{col_letter}{row_idx + 1}', risk_value, good_format)
+    
+    # 3. SUMMARY STATISTICS SHEETS
+    model_summary.to_excel(writer, sheet_name='Model_Summary_Stats', index=False)
+    model_sum_sheet = writer.sheets['Model_Summary_Stats']
+    model_sum_sheet.set_row(0, None, header_format)
+    for col_num in range(1, len(model_summary.columns)):
+        model_sum_sheet.set_column(col_num, col_num, 15, currency_format)
+    
+    family_summary.to_excel(writer, sheet_name='Family_Summary_Stats', index=False)
+    family_sum_sheet = writer.sheets['Family_Summary_Stats']
+    family_sum_sheet.set_row(0, None, header_format)
+    for col_num in range(1, len(family_summary.columns)):
+        family_sum_sheet.set_column(col_num, col_num, 15, currency_format)
+    
+    # 4. HIGH PRIORITY OUTLIERS (Critical + High Risk only)
+    high_priority_models = model_detailed[
+        (model_detailed['Cost per Claim_Risk_Level'].isin(['Critical Risk', 'High Risk'])) |
+        (model_detailed['Combined Metric_Risk_Level'].isin(['Critical Risk', 'High Risk']))
+    ].copy()
+    
+    if not high_priority_models.empty:
+        # Select key columns for priority view
+        priority_cols = ['Model']
+        for metric in ['Cost per Claim', 'Combined Metric']:
+            priority_cols.extend([
+                f'{metric}_Value', f'{metric}_Z_Score', 
+                f'{metric}_Percentile', f'{metric}_Risk_Level'
+            ])
+        
+        high_priority_models[priority_cols].to_excel(writer, sheet_name='High_Priority_Models', index=False)
+        priority_sheet = writer.sheets['High_Priority_Models']
+        priority_sheet.set_row(0, None, header_format)
+    
+    # 5. INTERPRETATION GUIDE
+    interpretation = pd.DataFrame([
+        {'Metric', 'Description'},
+        {'Z-Score', 'How many standard deviations from mean. >2=unusual, >3=very unusual'},
+        {'Percentile', 'What % of all models this one exceeds. 90%=top 10%'},
+        {'vs Mean', 'Difference from average. Positive=above average'},
+        {'vs Median', 'Difference from median. More robust than mean'},
+        {'Risk Level', 'Normal<1σ, Medium 1-2σ, High 2-3σ, Critical >3σ'},
+        {'CV%', 'Coefficient of Variation. >30%=high variability across models'}
     ])
     
-    recommendations.to_excel(writer, sheet_name='Action_Plan', index=False)
-    rec_sheet = writer.sheets['Action_Plan']
-    rec_sheet.set_row(0, None, header_format)
-    rec_sheet.set_column('A:A', 12)
-    rec_sheet.set_column('B:B', 25)
-    rec_sheet.set_column('C:C', 60)
-    
-    # Add analysis metadata
-    metadata = pd.DataFrame([
-        {'Field': 'Analysis Date', 'Value': datetime.now().strftime('%Y-%m-%d %H:%M:%S')},
-        {'Field': 'Metrics Analyzed', 'Value': 'Cost per Claim, Combined Metric'},
-        {'Field': 'Excluded Metrics', 'Value': 'Total Warranty Cost (as requested)'},
-        {'Field': 'Z-Score Threshold (Medium Risk)', 'Value': '> 2.0'},
-        {'Field': 'Z-Score Threshold (High Risk)', 'Value': '> 3.0'},
-        {'Field': 'IQR Multiplier', 'Value': '1.5'},
-        {'Field': 'Total Models Analyzed', 'Value': len(model_df)},
-        {'Field': 'Total Families Analyzed', 'Value': len(family_df)},
-        {'Field': 'Family Column Name', 'Value': family_col}
-    ])
-    
-    metadata.to_excel(writer, sheet_name='Analysis_Info', index=False)
-    meta_sheet = writer.sheets['Analysis_Info']
-    meta_sheet.set_row(0, None, header_format)
-    meta_sheet.set_column('A:A', 25)
-    meta_sheet.set_column('B:B', 40)
+    interpretation.to_excel(writer, sheet_name='How_to_Read', index=False)
+    interp_sheet = writer.sheets['How_to_Read']
+    interp_sheet.set_row(0, None, header_format)
+    interp_sheet.set_column('A:A', 15)
+    interp_sheet.set_column('B:B', 60)
     
     writer.close()
-    print(f"Business report saved as: {output_file}")
+    print(f"Comprehensive analysis saved as: {output_file}")
 
 # Generate the report
-create_business_report()
+create_comprehensive_report()
 
 print(f"""
-📊 UPDATED BUSINESS REPORT CREATED: {output_file}
+📊 COMPREHENSIVE ANALYSIS CREATED: {output_file}
 
-🔄 CHANGES MADE:
-✅ Excluded 'Total Warranty Cost' from analysis (as requested)
-✅ Updated family column to "Model Family" (with space)
-✅ Analysis now focuses on: Cost per Claim & Combined Metric only
+📋 COMPLETE ANALYSIS SHEETS:
+1. All_Models_Analysis     - Every model with Z-scores, percentiles, risk levels
+2. All_Families_Analysis   - Every family with complete statistical metrics  
+3. Model_Summary_Stats     - Mean, Std Dev, CV%, quartiles for all metrics
+4. Family_Summary_Stats    - Statistical overview for family-level data
+5. High_Priority_Models    - Critical & High risk models (filtered view)
+6. How_to_Read            - Interpretation guide for all metrics
 
-📋 SHEETS INCLUDED:
-1. Executive_Summary    - Overview of Cost per Claim & Combined Metric volatility
-2. Model_Outliers      - Individual models with unusual cost patterns
-3. Family_Outliers     - Model families with cost issues
-4. All_Models_Data     - Complete dataset for reference
-5. Action_Plan         - Focused recommendations for cost metrics
-6. Analysis_Info       - Updated methodology and parameters
+📈 STATISTICAL METRICS FOR EACH MODEL/FAMILY:
+• Actual Value
+• Z-Score (standard deviations from mean)
+• Percentile Rank (what % of models this exceeds)
+• Difference vs Mean
+• Difference vs Median  
+• Risk Level (Normal/Medium/High/Critical)
 
-🎯 BUSINESS FOCUS:
-• Cost per Claim outliers (models with unusual repair costs)
-• Combined Metric outliers (models with high claim rate × cost impact)
-• Risk-based prioritization for cost management decisions
+🎨 COLOR CODING:
+• Green: Normal range (within 1 standard deviation)
+• Yellow: Medium risk (1-2 standard deviations)
+• Orange: High risk (2-3 standard deviations) 
+• Red: Critical risk (>3 standard deviations)
+
+🎯 BUSINESS USE:
+• Z-Score >2: Requires investigation
+• Percentile >90: Top 10% most expensive
+• Risk Level: Direct priority for action
 """)
