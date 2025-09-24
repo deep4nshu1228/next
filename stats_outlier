@@ -25,6 +25,56 @@ family_col = "Model Family"
 def clean_numeric(series):
     return pd.to_numeric(series.astype(str).str.replace(",", "").str.replace("₹", "").str.strip(), errors="coerce")
 
+def create_enhanced_ranking_table(df, group_col, sort_col, n_top=10, ascending=False):
+    """Create ranking table with Z-scores and statistical analysis"""
+    
+    # Clean the data
+    df_clean = df.copy()
+    df_clean[sort_col] = clean_numeric(df_clean[sort_col])
+    df_clean = df_clean.dropna(subset=[sort_col])
+    
+    # Calculate overall statistics for Z-score
+    overall_mean = df_clean[sort_col].mean()
+    overall_std = df_clean[sort_col].std()
+    
+    # Get top/bottom performers
+    if ascending:
+        ranked_df = df_clean.nsmallest(n_top, sort_col)
+        rank_type = "LOWEST"
+    else:
+        ranked_df = df_clean.nlargest(n_top, sort_col)
+        rank_type = "HIGHEST"
+    
+    # Add statistical analysis columns
+    enhanced_df = ranked_df.copy()
+    enhanced_df['Z_Score'] = (enhanced_df[sort_col] - overall_mean) / overall_std
+    enhanced_df['Percentile'] = enhanced_df[sort_col].apply(lambda x: stats.percentileofscore(df_clean[sort_col], x))
+    enhanced_df['vs_Mean'] = enhanced_df[sort_col] - overall_mean
+    enhanced_df['vs_Median'] = enhanced_df[sort_col] - df_clean[sort_col].median()
+    
+    # Add additional cost metrics if available
+    cost_cols = [cost_per_claim_col, combined_metric_col, claim_rate_col]
+    available_cols = [col for col in cost_cols if col in enhanced_df.columns]
+    
+    # Select columns for output
+    output_cols = [group_col, sort_col, 'Z_Score', 'Percentile', 'vs_Mean', 'vs_Median']
+    
+    # Add other cost metrics
+    for col in available_cols:
+        if col != sort_col:
+            output_cols.append(col)
+    
+    # Add volume metrics if available
+    volume_cols = [num_records_col, vehicles_col]
+    for col in volume_cols:
+        if col in enhanced_df.columns:
+            output_cols.append(col)
+    
+    # Filter to available columns
+    final_cols = [col for col in output_cols if col in enhanced_df.columns]
+    
+    return enhanced_df[final_cols], rank_type
+
 def statistical_analysis(df, group_col, analysis_columns):
     """Generate statistical analysis for all models/families"""
     
@@ -161,7 +211,7 @@ def generate_model_actionable_insights(model_stats, model_df):
             'Key_Issue': "High warranty costs" if cost_z > 1 else "Cost volatility" if abs(combined_z) > 1 else "Monitor trends",
             'Primary_Recommendation': recommendations[0] if recommendations else "Continue monitoring",
             'Secondary_Actions': " | ".join(recommendations[1:3]) if len(recommendations) > 1 else "None",
-            'Estimated_Annual_Savings': potential_savings * row.get('Number of Records Where Warranty Came In', 0) if 'Number of Records Where Warranty Came In' in row else 0,
+            'Estimated_Annual_Savings': potential_savings * row.get('Cost_per_Claim', 0) if 'Cost_per_Claim' in row else 0,
             'Next_Review_Date': (datetime.now() + pd.DateOffset(months=1 if priority == "High" else 3)).strftime('%Y-%m-%d')
         })
     
@@ -286,6 +336,7 @@ def create_comprehensive_report():
     critical_format = workbook.add_format({'bg_color': '#FF6B6B', 'font_color': 'white', 'bold': True})
     high_format = workbook.add_format({'bg_color': '#FFB347', 'font_color': 'black'})
     medium_format = workbook.add_format({'bg_color': '#FFEB9C', 'font_color': 'black'})
+    good_format = workbook.add_format({'bg_color': '#90EE90', 'font_color': 'black'})
     
     # Analysis columns
     analysis_columns = [cost_per_claim_col, combined_metric_col, claim_rate_col, num_records_col, vehicles_col]
@@ -348,7 +399,7 @@ def create_comprehensive_report():
         elif priority == 'Medium':
             family_strategy_sheet.set_row(row_idx, None, medium_format)
     
-    # 4-9. ORIGINAL STATISTICAL SHEETS
+    # 4-7. ORIGINAL STATISTICAL SHEETS
     sheets_data = [
         ('Model_Statistics', model_stats),
         ('Family_Statistics', family_stats), 
@@ -368,58 +419,103 @@ def create_comprehensive_report():
             else:
                 sheet.set_column(col_idx, col_idx, 12, decimal_format)
     
-    # TOP/BOTTOM PERFORMERS
+    # 8-11. TOP/BOTTOM PERFORMERS WITH Z-SCORES
     if cost_per_claim_col in model_df.columns:
-        model_df_clean = model_df.copy()
-        model_df_clean[cost_per_claim_col] = clean_numeric(model_df_clean[cost_per_claim_col])
+        # MODEL RANKINGS
+        top_cost_models, _ = create_enhanced_ranking_table(model_df, 'Model', cost_per_claim_col, n_top=10, ascending=False)
+        top_cost_models.to_excel(writer, sheet_name='Top_Cost_Models', index=False)
         
-        top_cost = model_df_clean.nlargest(10, cost_per_claim_col)[['Model', cost_per_claim_col, combined_metric_col]]
-        top_cost.to_excel(writer, sheet_name='Top_Cost_Models', index=False)
+        bottom_cost_models, _ = create_enhanced_ranking_table(model_df, 'Model', cost_per_claim_col, n_top=10, ascending=True)
+        bottom_cost_models.to_excel(writer, sheet_name='Bottom_Cost_Models', index=False)
         
-        bottom_cost = model_df_clean.nsmallest(10, cost_per_claim_col)[['Model', cost_per_claim_col, combined_metric_col]]
-        bottom_cost.to_excel(writer, sheet_name='Bottom_Cost_Models', index=False)
-        
+        # Format model ranking sheets
         for sheet_name in ['Top_Cost_Models', 'Bottom_Cost_Models']:
             sheet = writer.sheets[sheet_name]
             sheet.set_row(0, None, header_format)
-            sheet.set_column('A:A', 25)
-            sheet.set_column('B:C', 15, currency_format)
+            sheet.set_column('A:A', 25)  # Model names
+            sheet.set_column('B:B', 15, currency_format)  # Cost per claim
+            sheet.set_column('C:C', 12, decimal_format)   # Z-Score
+            sheet.set_column('D:D', 12, decimal_format)   # Percentile
+            sheet.set_column('E:F', 15, currency_format)  # vs Mean, vs Median
+            
+            # Color code based on Z-scores
+            for row_idx in range(1, len(top_cost_models) + 1):
+                z_score = float(sheet.cell(row_idx, 2).value) if sheet.cell(row_idx, 2).value else 0
+                if abs(z_score) > 3:
+                    sheet.set_row(row_idx, None, critical_format)
+                elif abs(z_score) > 2:
+                    sheet.set_row(row_idx, None, high_format)
+                elif abs(z_score) > 1:
+                    sheet.set_row(row_idx, None, medium_format)
+    
+    if cost_per_claim_col in family_df.columns:
+        # FAMILY RANKINGS
+        top_cost_families, _ = create_enhanced_ranking_table(family_df, family_col, cost_per_claim_col, n_top=10, ascending=False)
+        top_cost_families.to_excel(writer, sheet_name='Top_Cost_Families', index=False)
+        
+        bottom_cost_families, _ = create_enhanced_ranking_table(family_df, family_col, cost_per_claim_col, n_top=10, ascending=True)
+        bottom_cost_families.to_excel(writer, sheet_name='Bottom_Cost_Families', index=False)
+        
+        # Format family ranking sheets
+        for sheet_name in ['Top_Cost_Families', 'Bottom_Cost_Families']:
+            sheet = writer.sheets[sheet_name]
+            sheet.set_row(0, None, header_format)
+            sheet.set_column('A:A', 25)  # Family names
+            sheet.set_column('B:B', 15, currency_format)  # Cost per claim
+            sheet.set_column('C:C', 12, decimal_format)   # Z-Score
+            sheet.set_column('D:D', 12, decimal_format)   # Percentile
+            sheet.set_column('E:F', 15, currency_format)  # vs Mean, vs Median
+            
+            # Color code based on Z-scores
+            for row_idx in range(1, len(top_cost_families) + 1):
+                z_score = float(sheet.cell(row_idx, 2).value) if sheet.cell(row_idx, 2).value else 0
+                if abs(z_score) > 3:
+                    sheet.set_row(row_idx, None, critical_format)
+                elif abs(z_score) > 2:
+                    sheet.set_row(row_idx, None, high_format)
+                elif abs(z_score) > 1:
+                    sheet.set_row(row_idx, None, medium_format)
     
     writer.close()
-    print(f"Comprehensive analysis with actionable insights saved as: {output_file}")
+    print(f"Comprehensive analysis with enhanced rankings saved as: {output_file}")
 
 # Generate the report
 create_comprehensive_report()
 
 print(f"""
-🚀 COMPREHENSIVE BUSINESS ANALYSIS CREATED: {output_file}
+🚀 ENHANCED BUSINESS ANALYSIS CREATED: {output_file}
 
-📋 NEW ACTIONABLE INSIGHTS SHEETS:
-1. Executive_Action_Plan   - 4-phase strategic action plan with timelines & owners
-2. Model_Action_Items     - Specific recommendations for each model with savings estimates  
-3. Family_Strategy        - Strategic initiatives for each model family
+📋 ACTIONABLE INSIGHTS SHEETS:
+1. Executive_Action_Plan   - Strategic roadmap with priorities & timelines
+2. Model_Action_Items     - Model-specific recommendations with savings estimates  
+3. Family_Strategy        - Family-level strategic initiatives
 
-📈 ORIGINAL STATISTICAL SHEETS:
-4. Model_Statistics       - Z-scores, percentiles for all models
-5. Family_Statistics      - Z-scores, percentiles for all families
+📈 STATISTICAL ANALYSIS SHEETS:
+4. Model_Statistics       - Complete Z-scores & percentiles for all models
+5. Family_Statistics      - Complete Z-scores & percentiles for all families
 6. Model_Summary         - Statistical overview of model metrics
 7. Family_Summary        - Statistical overview of family metrics
-8. Top_Cost_Models       - 10 highest cost models
-9. Bottom_Cost_Models    - 10 lowest cost models (benchmarks)
 
-🎯 ACTIONABLE INSIGHTS INCLUDE:
-• Priority levels (High/Medium/Low) with color coding
-• Specific recommendations for each model/family
-• Estimated annual savings potential
-• Timeline for action (30/90/180/365 days)
-• Responsible owners (Quality, Supply Chain, Engineering)
-• Success metrics and KPIs
-• Strategic vs operational actions
+🏆 ENHANCED RANKING SHEETS (NEW WITH Z-SCORES):
+8. Top_Cost_Models       - 10 highest cost models with Z-scores & analysis
+9. Bottom_Cost_Models    - 10 lowest cost models with Z-scores & benchmarks
+10. Top_Cost_Families    - 10 highest cost families with Z-scores & analysis  
+11. Bottom_Cost_Families - 10 lowest cost families with Z-scores & benchmarks
+
+🎯 NEW FEATURES IN RANKING SHEETS:
+• Z-Scores for statistical significance
+• Percentile rankings
+• Difference vs Mean & Median
+• Color coding by Z-score severity:
+  - Red: |Z-score| > 3 (Critical outliers)
+  - Orange: |Z-score| > 2 (High outliers)  
+  - Yellow: |Z-score| > 1 (Medium outliers)
+• Additional cost metrics for context
+• Volume data for business impact assessment
 
 💼 BUSINESS VALUE:
-• Clear priorities for management attention
-• Quantified savings opportunities
-• Strategic roadmap for cost optimization
-• Benchmarking opportunities from best performers
-• Risk mitigation for high-cost outliers
+• Family-wise cost comparison for strategic decisions
+• Statistical significance of cost differences
+• Benchmark identification at both model & family levels
+• Clear priorities for cost optimization initiatives
 """)
