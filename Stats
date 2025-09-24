@@ -150,3 +150,174 @@ print("NaN rate in cost_per_claim:", bad["_isna"].mean())  # high indicates pars
 
 
 
+
+
+########################### outlier
+import pandas as pd
+import numpy as np
+from scipy import stats
+from IPython.display import display
+import matplotlib.pyplot as plt
+
+# --- CONFIG ---
+excel_path = "your_warranty.xlsx"
+
+# Load data
+model_df = pd.read_excel(excel_path, sheet_name="MODEL_Analysis")
+family_df = pd.read_excel(excel_path, sheet_name="MODEL_FAMILY_Analysis")
+
+# Cost metric columns (adjust names if needed)
+cost_per_claim_col = "Cost per Claim (Cost / Number of Warranty Claims)."
+total_cost_col = "Total Warranty Cost"
+combined_metric_col = "Combined Metric (Rate * Cost per Claim)"
+claim_rate_col = "Claims Rate (Number of Warranty Claims / Total Vehicles in Warranty)"
+
+# --- HELPER FUNCTIONS ---
+def clean_numeric(series):
+    """Clean and convert to numeric, handling commas and currency symbols"""
+    return pd.to_numeric(series.astype(str).str.replace(",", "").str.replace("₹", "").str.strip(), errors="coerce")
+
+def detect_outliers_zscore(df, column, model_col, threshold=2):
+    """Detect outliers using Z-score method. Threshold=2 means 2 std devs from mean"""
+    clean_values = clean_numeric(df[column])
+    z_scores = np.abs(stats.zscore(clean_values, nan_policy='omit'))
+    
+    outliers = df[z_scores > threshold].copy()
+    outliers[f'{column}_zscore'] = z_scores[z_scores > threshold]
+    
+    return outliers[[model_col, column, f'{column}_zscore']].sort_values(f'{column}_zscore', ascending=False)
+
+def detect_outliers_iqr(df, column, model_col):
+    """Detect outliers using IQR method (more robust to extreme values)"""
+    clean_values = clean_numeric(df[column])
+    
+    Q1 = clean_values.quantile(0.25)
+    Q3 = clean_values.quantile(0.75)
+    IQR = Q3 - Q1
+    
+    lower_bound = Q1 - 1.5 * IQR
+    upper_bound = Q3 + 1.5 * IQR
+    
+    outliers = df[(clean_values < lower_bound) | (clean_values > upper_bound)].copy()
+    outliers[f'{column}_distance_from_bounds'] = np.where(
+        clean_values < lower_bound, 
+        lower_bound - clean_values,
+        clean_values - upper_bound
+    )[outliers.index]
+    
+    return outliers[[model_col, column, f'{column}_distance_from_bounds']].sort_values(f'{column}_distance_from_bounds', ascending=False)
+
+def summary_stats(df, column):
+    """Get descriptive statistics for the cost column"""
+    clean_values = clean_numeric(df[column])
+    return {
+        'Mean': clean_values.mean(),
+        'Median': clean_values.median(), 
+        'Std Dev': clean_values.std(),
+        'Min': clean_values.min(),
+        'Max': clean_values.max(),
+        'CV%': (clean_values.std() / clean_values.mean()) * 100 if clean_values.mean() != 0 else np.nan
+    }
+
+# --- ANALYSIS FOR MODELS ---
+print("="*80)
+print("OUTLIER ANALYSIS FOR BIKE MODELS")
+print("="*80)
+
+# Summary statistics for cost metrics
+print(f"\n📊 SUMMARY STATISTICS:")
+for col in [cost_per_claim_col, total_cost_col, combined_metric_col]:
+    if col in model_df.columns:
+        stats_dict = summary_stats(model_df, col)
+        print(f"\n{col}:")
+        for k, v in stats_dict.items():
+            print(f"  {k}: {v:,.2f}" if pd.notna(v) else f"  {k}: {v}")
+
+# Z-Score Outliers (2 standard deviations)
+print(f"\n🚨 HIGH COST OUTLIERS - Z-Score Method (>2σ):")
+for col in [cost_per_claim_col, total_cost_col, combined_metric_col]:
+    if col in model_df.columns:
+        outliers_z = detect_outliers_zscore(model_df, col, "Model", threshold=2)
+        if not outliers_z.empty:
+            print(f"\n--- {col} ---")
+            display(outliers_z.head(10))
+        else:
+            print(f"\n--- {col} ---")
+            print("No outliers detected with Z-score > 2")
+
+# IQR Method Outliers (more robust)
+print(f"\n📈 OUTLIERS - IQR Method (beyond 1.5×IQR):")
+for col in [cost_per_claim_col, total_cost_col, combined_metric_col]:
+    if col in model_df.columns:
+        outliers_iqr = detect_outliers_iqr(model_df, col, "Model")
+        if not outliers_iqr.empty:
+            print(f"\n--- {col} ---")
+            display(outliers_iqr.head(10))
+        else:
+            print(f"\n--- {col} ---")
+            print("No outliers detected with IQR method")
+
+# --- ANALYSIS FOR MODEL FAMILIES ---
+print("\n" + "="*80)
+print("OUTLIER ANALYSIS FOR MODEL FAMILIES")
+print("="*80)
+
+# Summary statistics for families
+print(f"\n📊 SUMMARY STATISTICS:")
+for col in [cost_per_claim_col, total_cost_col, combined_metric_col]:
+    if col in family_df.columns:
+        stats_dict = summary_stats(family_df, col)
+        print(f"\n{col}:")
+        for k, v in stats_dict.items():
+            print(f"  {k}: {v:,.2f}" if pd.notna(v) else f"  {k}: {v}")
+
+# Family outliers
+print(f"\n🚨 FAMILY OUTLIERS - Z-Score Method:")
+for col in [cost_per_claim_col, total_cost_col, combined_metric_col]:
+    if col in family_df.columns:
+        outliers_z = detect_outliers_zscore(family_df, col, "Model_family", threshold=2)
+        if not outliers_z.empty:
+            print(f"\n--- {col} ---")
+            display(outliers_z)
+
+# --- INTERPRETATION GUIDE ---
+print(f"\n" + "="*80)
+print("📖 INTERPRETATION GUIDE")
+print("="*80)
+print("""
+Z-Score Outliers:
+• Z-score > 2: Moderately unusual (outside 95% of normal distribution)
+• Z-score > 3: Highly unusual (outside 99.7% of normal distribution)
+
+IQR Outliers:
+• Beyond Q1 - 1.5×IQR or Q3 + 1.5×IQR
+• More robust to extreme values than Z-score
+• Standard method used in box plots
+
+Coefficient of Variation (CV%):
+• CV < 15%: Low variability across models
+• CV 15-30%: Moderate variability  
+• CV > 30%: High variability (many outliers expected)
+
+Action Items:
+1. Investigate models with Z-score > 3 (highest priority)
+2. Review models with Z-score > 2 for cost drivers
+3. Compare IQR and Z-score results for consistency
+""")
+
+# Optional: Create a simple ranking of most extreme models
+print(f"\n🏆 TOP 10 HIGHEST COST MODELS:")
+if cost_per_claim_col in model_df.columns:
+    model_df_clean = model_df.copy()
+    model_df_clean[cost_per_claim_col] = clean_numeric(model_df_clean[cost_per_claim_col])
+    top_cost_models = model_df_clean.nlargest(10, cost_per_claim_col)
+    display(top_cost_models[["Model", cost_per_claim_col, combined_metric_col]])
+
+print(f"\n💰 TOP 10 LOWEST COST MODELS:")
+if cost_per_claim_col in model_df.columns:
+    bottom_cost_models = model_df_clean.nsmallest(10, cost_per_claim_col)
+    display(bottom_cost_models[["Model", cost_per_claim_col, combined_metric_col]])
+
+
+
+
