@@ -6,7 +6,7 @@ import xlsxwriter
 
 # --- CONFIG ---
 excel_path = "your_warranty.xlsx"
-output_file = f"Warranty_Complete_Analysis_{datetime.now().strftime('%Y%m%d')}.xlsx"
+output_file = f"Warranty_Statistical_Analysis_{datetime.now().strftime('%Y%m%d')}.xlsx"
 
 # Load and prepare data
 model_df = pd.read_excel(excel_path, sheet_name="MODEL_Analysis")
@@ -25,97 +25,81 @@ family_col = "Model Family"
 def clean_numeric(series):
     return pd.to_numeric(series.astype(str).str.replace(",", "").str.replace("₹", "").str.strip(), errors="coerce")
 
-def comprehensive_statistical_analysis(df, group_col, analysis_columns):
-    """Generate complete statistical analysis for all models/families"""
+def statistical_analysis(df, group_col, analysis_columns):
+    """Generate statistical analysis for all models/families"""
     
-    # First, get overall statistics for all metrics
+    # Get overall statistics for calculating Z-scores
     overall_stats = {}
     for col in analysis_columns:
         if col in df.columns:
             clean_values = clean_numeric(df[col])
             overall_stats[col] = {
                 'mean': clean_values.mean(),
-                'std': clean_values.std(),
-                'median': clean_values.median(),
-                'q1': clean_values.quantile(0.25),
-                'q3': clean_values.quantile(0.75),
-                'min': clean_values.min(),
-                'max': clean_values.max()
+                'std': clean_values.std()
             }
     
-    # Now analyze each group (model/family)
-    detailed_analysis = []
+    # Analyze each group (model/family)
+    results = []
     
     for group_name in df[group_col].unique():
         if pd.isna(group_name):
             continue
             
         group_data = df[df[group_col] == group_name]
-        
         row = {group_col: group_name}
         
         for col in analysis_columns:
             if col in df.columns:
                 value = clean_numeric(group_data[col]).iloc[0] if len(group_data) > 0 else np.nan
                 
+                # Clean column name
+                clean_col_name = col.replace('(Cost / Number of Warranty Claims).', 'Cost_per_Claim').replace('(Rate * Cost per Claim)', 'Combined_Metric').replace('(Number of Warranty Claims / Total Vehicles in Warranty)', 'Claims_Rate')
+                
                 if not pd.isna(value) and col in overall_stats:
                     # Calculate Z-score
-                    z_score = (value - overall_stats[col]['mean']) / overall_stats[col]['std']
+                    z_score = (value - overall_stats[col]['mean']) / overall_stats[col]['std'] if overall_stats[col]['std'] != 0 else 0
                     
                     # Calculate percentile rank
                     all_values = clean_numeric(df[col]).dropna()
                     percentile = stats.percentileofscore(all_values, value)
                     
-                    # Determine risk category
-                    abs_z = abs(z_score)
-                    if abs_z > 3:
-                        risk_level = "Critical Risk"
-                    elif abs_z > 2:
-                        risk_level = "High Risk"  
-                    elif abs_z > 1:
-                        risk_level = "Medium Risk"
-                    else:
-                        risk_level = "Normal"
-                    
-                    # Clean column name for output
-                    clean_col_name = col.replace('(Cost / Number of Warranty Claims).', '').replace('(Rate * Cost per Claim)', '').strip()
-                    
-                    # Add detailed metrics
-                    row[f'{clean_col_name}_Value'] = value
-                    row[f'{clean_col_name}_Z_Score'] = z_score
+                    # Add metrics
+                    row[f'{clean_col_name}'] = value
+                    row[f'{clean_col_name}_ZScore'] = z_score
                     row[f'{clean_col_name}_Percentile'] = percentile
                     row[f'{clean_col_name}_vs_Mean'] = value - overall_stats[col]['mean']
-                    row[f'{clean_col_name}_vs_Median'] = value - overall_stats[col]['median']
-                    row[f'{clean_col_name}_Risk_Level'] = risk_level
                     
-        detailed_analysis.append(row)
+        results.append(row)
     
-    detailed_df = pd.DataFrame(detailed_analysis)
+    return pd.DataFrame(results)
+
+def summary_statistics(df, analysis_columns):
+    """Generate summary statistics table"""
+    summary = []
     
-    # Create summary statistics table
-    summary_stats = []
     for col in analysis_columns:
-        if col in df.columns and col in overall_stats:
-            clean_col_name = col.replace('(Cost / Number of Warranty Claims).', '').replace('(Rate * Cost per Claim)', '').strip()
-            summary_stats.append({
+        if col in df.columns:
+            clean_values = clean_numeric(df[col])
+            clean_col_name = col.replace('(Cost / Number of Warranty Claims).', 'Cost_per_Claim').replace('(Rate * Cost per Claim)', 'Combined_Metric').replace('(Number of Warranty Claims / Total Vehicles in Warranty)', 'Claims_Rate')
+            
+            summary.append({
                 'Metric': clean_col_name,
-                'Mean': overall_stats[col]['mean'],
-                'Std_Dev': overall_stats[col]['std'],
-                'CV_Percent': (overall_stats[col]['std'] / overall_stats[col]['mean']) * 100,
-                'Median': overall_stats[col]['median'],
-                'Q1': overall_stats[col]['q1'],
-                'Q3': overall_stats[col]['q3'],
-                'Min': overall_stats[col]['min'],
-                'Max': overall_stats[col]['max'],
-                'Range': overall_stats[col]['max'] - overall_stats[col]['min']
+                'Count': clean_values.count(),
+                'Mean': clean_values.mean(),
+                'Std_Dev': clean_values.std(),
+                'CV_Percent': (clean_values.std() / clean_values.mean()) * 100 if clean_values.mean() != 0 else 0,
+                'Min': clean_values.min(),
+                'Q1': clean_values.quantile(0.25),
+                'Median': clean_values.median(),
+                'Q3': clean_values.quantile(0.75),
+                'Max': clean_values.max(),
+                'Range': clean_values.max() - clean_values.min()
             })
     
-    summary_df = pd.DataFrame(summary_stats)
-    
-    return detailed_df, summary_df
+    return pd.DataFrame(summary)
 
-# --- GENERATE COMPREHENSIVE REPORT ---
-def create_comprehensive_report():
+# --- GENERATE REPORT ---
+def create_statistical_report():
     writer = pd.ExcelWriter(output_file, engine='xlsxwriter')
     workbook = writer.book
     
@@ -129,192 +113,121 @@ def create_comprehensive_report():
         'border': 1
     })
     
-    critical_format = workbook.add_format({'bg_color': '#FF6B6B', 'font_color': 'white', 'bold': True})
-    high_risk_format = workbook.add_format({'bg_color': '#FFB347', 'font_color': 'black'})
-    medium_risk_format = workbook.add_format({'bg_color': '#FFEB9C', 'font_color': 'black'})
-    good_format = workbook.add_format({'bg_color': '#90EE90', 'font_color': 'black'})
-    
     currency_format = workbook.add_format({'num_format': '#,##0.00', 'align': 'right'})
-    percentage_format = workbook.add_format({'num_format': '0.00%', 'align': 'right'})
     decimal_format = workbook.add_format({'num_format': '0.00', 'align': 'right'})
+    percentage_format = workbook.add_format({'num_format': '0.00%', 'align': 'right'})
     
     # Analysis columns
-    analysis_columns = [cost_per_claim_col, combined_metric_col, claim_rate_col]
+    analysis_columns = [cost_per_claim_col, combined_metric_col, claim_rate_col, num_records_col, vehicles_col]
     
-    # 1. MODEL COMPLETE ANALYSIS
-    model_detailed, model_summary = comprehensive_statistical_analysis(model_df, 'Model', analysis_columns)
+    # 1. MODEL STATISTICAL ANALYSIS
+    model_stats = statistical_analysis(model_df, 'Model', analysis_columns)
+    model_stats.to_excel(writer, sheet_name='Model_Statistics', index=False)
     
-    # Save model detailed analysis
-    model_detailed.to_excel(writer, sheet_name='All_Models_Analysis', index=False)
-    model_sheet = writer.sheets['All_Models_Analysis']
+    model_sheet = writer.sheets['Model_Statistics']
     model_sheet.set_row(0, None, header_format)
-    
-    # Format columns and apply conditional formatting
     model_sheet.set_column('A:A', 25)  # Model names
-    col_idx = 1
     
-    for metric in ['Cost per Claim', 'Combined Metric', 'Claims Rate']:
-        # Value columns
-        model_sheet.set_column(col_idx, col_idx, 15, currency_format if 'Cost' in metric else decimal_format)
-        col_idx += 1
-        
-        # Z-score columns
-        model_sheet.set_column(col_idx, col_idx, 12, decimal_format)
-        col_idx += 1
-        
-        # Percentile columns  
-        model_sheet.set_column(col_idx, col_idx, 12, decimal_format)
-        col_idx += 1
-        
-        # vs Mean columns
-        model_sheet.set_column(col_idx, col_idx, 15, currency_format if 'Cost' in metric else decimal_format)
-        col_idx += 1
-        
-        # vs Median columns
-        model_sheet.set_column(col_idx, col_idx, 15, currency_format if 'Cost' in metric else decimal_format)
-        col_idx += 1
-        
-        # Risk level columns
-        model_sheet.set_column(col_idx, col_idx, 15)
-        col_idx += 1
+    # Format numeric columns
+    for col_idx in range(1, len(model_stats.columns)):
+        col_name = model_stats.columns[col_idx]
+        if 'Cost' in col_name or 'Combined_Metric' in col_name:
+            model_sheet.set_column(col_idx, col_idx, 15, currency_format)
+        elif 'Percentile' in col_name:
+            model_sheet.set_column(col_idx, col_idx, 12, decimal_format)
+        else:
+            model_sheet.set_column(col_idx, col_idx, 12, decimal_format)
     
-    # Apply conditional formatting to risk level columns
-    for row_idx in range(1, len(model_detailed) + 1):
-        for metric in ['Cost per Claim', 'Combined Metric', 'Claims Rate']:
-            risk_col = f'{metric}_Risk_Level'
-            if risk_col in model_detailed.columns:
-                risk_value = model_detailed.iloc[row_idx - 1][risk_col]
-                col_letter = chr(ord('A') + list(model_detailed.columns).index(risk_col))
-                
-                if risk_value == 'Critical Risk':
-                    model_sheet.write(f'{col_letter}{row_idx + 1}', risk_value, critical_format)
-                elif risk_value == 'High Risk':
-                    model_sheet.write(f'{col_letter}{row_idx + 1}', risk_value, high_risk_format)
-                elif risk_value == 'Medium Risk':
-                    model_sheet.write(f'{col_letter}{row_idx + 1}', risk_value, medium_risk_format)
-                else:
-                    model_sheet.write(f'{col_letter}{row_idx + 1}', risk_value, good_format)
+    # 2. FAMILY STATISTICAL ANALYSIS
+    family_stats = statistical_analysis(family_df, family_col, analysis_columns)
+    family_stats.to_excel(writer, sheet_name='Family_Statistics', index=False)
     
-    # 2. FAMILY COMPLETE ANALYSIS
-    family_detailed, family_summary = comprehensive_statistical_analysis(family_df, family_col, analysis_columns)
-    
-    # Save family detailed analysis
-    family_detailed.to_excel(writer, sheet_name='All_Families_Analysis', index=False)
-    family_sheet = writer.sheets['All_Families_Analysis']
+    family_sheet = writer.sheets['Family_Statistics']
     family_sheet.set_row(0, None, header_format)
+    family_sheet.set_column('A:A', 25)  # Family names
     
-    # Format family sheet similar to model sheet
-    family_sheet.set_column('A:A', 25)
-    col_idx = 1
+    # Format numeric columns
+    for col_idx in range(1, len(family_stats.columns)):
+        col_name = family_stats.columns[col_idx]
+        if 'Cost' in col_name or 'Combined_Metric' in col_name:
+            family_sheet.set_column(col_idx, col_idx, 15, currency_format)
+        elif 'Percentile' in col_name:
+            family_sheet.set_column(col_idx, col_idx, 12, decimal_format)
+        else:
+            family_sheet.set_column(col_idx, col_idx, 12, decimal_format)
     
-    for metric in ['Cost per Claim', 'Combined Metric', 'Claims Rate']:
-        family_sheet.set_column(col_idx, col_idx, 15, currency_format if 'Cost' in metric else decimal_format)
-        family_sheet.set_column(col_idx + 1, col_idx + 1, 12, decimal_format)  # Z-score
-        family_sheet.set_column(col_idx + 2, col_idx + 2, 12, decimal_format)  # Percentile
-        family_sheet.set_column(col_idx + 3, col_idx + 3, 15, currency_format if 'Cost' in metric else decimal_format)  # vs Mean
-        family_sheet.set_column(col_idx + 4, col_idx + 4, 15, currency_format if 'Cost' in metric else decimal_format)  # vs Median
-        family_sheet.set_column(col_idx + 5, col_idx + 5, 15)  # Risk Level
-        col_idx += 6
+    # 3. SUMMARY STATISTICS - MODELS
+    model_summary = summary_statistics(model_df, analysis_columns)
+    model_summary.to_excel(writer, sheet_name='Model_Summary', index=False)
     
-    # Apply conditional formatting to family risk levels
-    for row_idx in range(1, len(family_detailed) + 1):
-        for metric in ['Cost per Claim', 'Combined Metric', 'Claims Rate']:
-            risk_col = f'{metric}_Risk_Level'
-            if risk_col in family_detailed.columns:
-                risk_value = family_detailed.iloc[row_idx - 1][risk_col]
-                col_letter = chr(ord('A') + list(family_detailed.columns).index(risk_col))
-                
-                if risk_value == 'Critical Risk':
-                    family_sheet.write(f'{col_letter}{row_idx + 1}', risk_value, critical_format)
-                elif risk_value == 'High Risk':
-                    family_sheet.write(f'{col_letter}{row_idx + 1}', risk_value, high_risk_format)
-                elif risk_value == 'Medium Risk':
-                    family_sheet.write(f'{col_letter}{row_idx + 1}', risk_value, medium_risk_format)
-                else:
-                    family_sheet.write(f'{col_letter}{row_idx + 1}', risk_value, good_format)
-    
-    # 3. SUMMARY STATISTICS SHEETS
-    model_summary.to_excel(writer, sheet_name='Model_Summary_Stats', index=False)
-    model_sum_sheet = writer.sheets['Model_Summary_Stats']
+    model_sum_sheet = writer.sheets['Model_Summary']
     model_sum_sheet.set_row(0, None, header_format)
-    for col_num in range(1, len(model_summary.columns)):
-        model_sum_sheet.set_column(col_num, col_num, 15, currency_format)
+    model_sum_sheet.set_column('A:A', 20)  # Metric names
+    for col_idx in range(1, len(model_summary.columns)):
+        if 'CV_Percent' in model_summary.columns[col_idx]:
+            model_sum_sheet.set_column(col_idx, col_idx, 12, decimal_format)
+        else:
+            model_sum_sheet.set_column(col_idx, col_idx, 15, currency_format)
     
-    family_summary.to_excel(writer, sheet_name='Family_Summary_Stats', index=False)
-    family_sum_sheet = writer.sheets['Family_Summary_Stats']
+    # 4. SUMMARY STATISTICS - FAMILIES
+    family_summary = summary_statistics(family_df, analysis_columns)
+    family_summary.to_excel(writer, sheet_name='Family_Summary', index=False)
+    
+    family_sum_sheet = writer.sheets['Family_Summary']
     family_sum_sheet.set_row(0, None, header_format)
-    for col_num in range(1, len(family_summary.columns)):
-        family_sum_sheet.set_column(col_num, col_num, 15, currency_format)
+    family_sum_sheet.set_column('A:A', 20)  # Metric names
+    for col_idx in range(1, len(family_summary.columns)):
+        if 'CV_Percent' in family_summary.columns[col_idx]:
+            family_sum_sheet.set_column(col_idx, col_idx, 12, decimal_format)
+        else:
+            family_sum_sheet.set_column(col_idx, col_idx, 15, currency_format)
     
-    # 4. HIGH PRIORITY OUTLIERS (Critical + High Risk only)
-    high_priority_models = model_detailed[
-        (model_detailed['Cost per Claim_Risk_Level'].isin(['Critical Risk', 'High Risk'])) |
-        (model_detailed['Combined Metric_Risk_Level'].isin(['Critical Risk', 'High Risk']))
-    ].copy()
-    
-    if not high_priority_models.empty:
-        # Select key columns for priority view
-        priority_cols = ['Model']
-        for metric in ['Cost per Claim', 'Combined Metric']:
-            priority_cols.extend([
-                f'{metric}_Value', f'{metric}_Z_Score', 
-                f'{metric}_Percentile', f'{metric}_Risk_Level'
-            ])
+    # 5. TOP/BOTTOM PERFORMERS
+    # Top 10 Cost per Claim
+    if cost_per_claim_col in model_df.columns:
+        model_df_clean = model_df.copy()
+        model_df_clean[cost_per_claim_col] = clean_numeric(model_df_clean[cost_per_claim_col])
         
-        high_priority_models[priority_cols].to_excel(writer, sheet_name='High_Priority_Models', index=False)
-        priority_sheet = writer.sheets['High_Priority_Models']
-        priority_sheet.set_row(0, None, header_format)
-    
-    # 5. INTERPRETATION GUIDE
-    interpretation = pd.DataFrame([
-        {'Metric', 'Description'},
-        {'Z-Score', 'How many standard deviations from mean. >2=unusual, >3=very unusual'},
-        {'Percentile', 'What % of all models this one exceeds. 90%=top 10%'},
-        {'vs Mean', 'Difference from average. Positive=above average'},
-        {'vs Median', 'Difference from median. More robust than mean'},
-        {'Risk Level', 'Normal<1σ, Medium 1-2σ, High 2-3σ, Critical >3σ'},
-        {'CV%', 'Coefficient of Variation. >30%=high variability across models'}
-    ])
-    
-    interpretation.to_excel(writer, sheet_name='How_to_Read', index=False)
-    interp_sheet = writer.sheets['How_to_Read']
-    interp_sheet.set_row(0, None, header_format)
-    interp_sheet.set_column('A:A', 15)
-    interp_sheet.set_column('B:B', 60)
+        top_cost = model_df_clean.nlargest(10, cost_per_claim_col)[['Model', cost_per_claim_col, combined_metric_col]]
+        top_cost.to_excel(writer, sheet_name='Top_Cost_Models', index=False)
+        
+        bottom_cost = model_df_clean.nsmallest(10, cost_per_claim_col)[['Model', cost_per_claim_col, combined_metric_col]]
+        bottom_cost.to_excel(writer, sheet_name='Bottom_Cost_Models', index=False)
+        
+        # Format these sheets
+        for sheet_name in ['Top_Cost_Models', 'Bottom_Cost_Models']:
+            sheet = writer.sheets[sheet_name]
+            sheet.set_row(0, None, header_format)
+            sheet.set_column('A:A', 25)
+            sheet.set_column('B:C', 15, currency_format)
     
     writer.close()
-    print(f"Comprehensive analysis saved as: {output_file}")
+    print(f"Statistical analysis saved as: {output_file}")
 
 # Generate the report
-create_comprehensive_report()
+create_statistical_report()
 
 print(f"""
-📊 COMPREHENSIVE ANALYSIS CREATED: {output_file}
+📊 STATISTICAL ANALYSIS CREATED: {output_file}
 
-📋 COMPLETE ANALYSIS SHEETS:
-1. All_Models_Analysis     - Every model with Z-scores, percentiles, risk levels
-2. All_Families_Analysis   - Every family with complete statistical metrics  
-3. Model_Summary_Stats     - Mean, Std Dev, CV%, quartiles for all metrics
-4. Family_Summary_Stats    - Statistical overview for family-level data
-5. High_Priority_Models    - Critical & High risk models (filtered view)
-6. How_to_Read            - Interpretation guide for all metrics
+📋 SHEETS INCLUDED:
+1. Model_Statistics    - Z-scores, percentiles, vs mean for all models
+2. Family_Statistics   - Z-scores, percentiles, vs mean for all families
+3. Model_Summary      - Mean, std dev, CV%, quartiles for model metrics
+4. Family_Summary     - Mean, std dev, CV%, quartiles for family metrics
+5. Top_Cost_Models    - 10 highest cost per claim models
+6. Bottom_Cost_Models - 10 lowest cost per claim models
 
-📈 STATISTICAL METRICS FOR EACH MODEL/FAMILY:
-• Actual Value
-• Z-Score (standard deviations from mean)
-• Percentile Rank (what % of models this exceeds)
+📈 STATISTICAL METRICS INCLUDED:
+• Actual Values
+• Z-Scores (how many std devs from mean)
+• Percentiles (ranking among all models/families)
 • Difference vs Mean
-• Difference vs Median  
-• Risk Level (Normal/Medium/High/Critical)
+• Summary statistics (mean, std dev, CV%, quartiles)
 
-🎨 COLOR CODING:
-• Green: Normal range (within 1 standard deviation)
-• Yellow: Medium risk (1-2 standard deviations)
-• Orange: High risk (2-3 standard deviations) 
-• Red: Critical risk (>3 standard deviations)
-
-🎯 BUSINESS USE:
-• Z-Score >2: Requires investigation
-• Percentile >90: Top 10% most expensive
-• Risk Level: Direct priority for action
+🔍 KEY INSIGHTS:
+• Z-Score > 2: Statistically significant outlier
+• Percentile > 90: Top 10% performer
+• CV% > 30: High variability metric
+• Use for identifying patterns and outliers
 """)
