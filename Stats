@@ -119,3 +119,34 @@ display(flag_high_volatility(model_cv, primary_model_cv, threshold=30.0))
 
 print("\nHigh-volatility Model Families (CV% > 30 on primary metric):")
 display(flag_high_volatility(family_cv, primary_family_cv, threshold=30.0))
+
+
+
+
+
+
+
+
+
+############################# test
+
+# 1) Confirm multiple rows per model/family
+print(model_df.groupby(model_group_col).size().describe())  # should be >1 per group on average [web:152]
+print(family_df.groupby(family_group_col).size().describe())  # same check [web:152]
+
+# 2) Check variance exists before grouping
+for col in [cost_per_claim_col, total_cost_col, combined_metric_col]:
+    if col in model_df.columns:
+        print(col, "unique values count:", model_df[col].nunique())  # should be >1 to have variability [web:119]
+        
+# 3) Spot non-numeric remnants
+print(model_df.dtypes)  # verify metrics are float, not object [web:92]
+print(model_df.head(3))  # manual inspection for stray symbols [web:92]
+
+# 4) Validate coercion
+bad = model_df[[cost_per_claim_col]].copy()
+bad["_isna"] = bad[cost_per_claim_col].isna()
+print("NaN rate in cost_per_claim:", bad["_isna"].mean())  # high indicates parsing issues [web:92]
+
+
+
