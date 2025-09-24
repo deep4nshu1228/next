@@ -1,0 +1,250 @@
+import argparse
+import pandas as pd
+import numpy as np
+import warnings
+
+warnings.filterwarnings("ignore")
+
+# ----------------------------
+# Helpers
+# ----------------------------
+def read_excel_all_sheets(path):
+    """
+    Read all sheets as a dict of DataFrames.
+    """
+    sheets = pd.read_excel(path, sheet_name=None)  # dict[str, DataFrame]
+    return {k: v for k, v in sheets.items()}  # preserve order [web:74][web:73]
+
+
+def normalize_columns(df):
+    """
+    Lowercase, strip, and replace spaces with underscores for all column names.
+    """
+    df = df.copy()
+    df.columns = (
+        df.columns.astype(str)
+        .str.strip()
+        .str.lower()
+        .str.replace(" ", "_")
+        .str.replace("-", "_")
+    )
+    return df
+
+
+def identify_cols(df, candidates):
+    """
+    Find the first column present from a candidate list.
+    """
+    for c in candidates:
+        if c in df.columns:
+            return c
+    return None
+
+
+def coefficient_of_variation(series):
+    """
+    CV (%) = std / mean * 100; returns np.nan if mean=0 or series too small.
+    """
+    s = series.dropna()
+    if len(s) < 2:
+        return np.nan
+    mu = s.mean()
+    if mu == 0:
+        return np.nan
+    return float(s.std(ddof=1) / mu * 100.0)  # % [web:87][web:80]
+
+
+def rolling_std(series, window=3, min_periods=3):
+    """
+    Rolling standard deviation with an integer window.
+    """
+    return series.rolling(window=window, min_periods=min_periods).std(ddof=1)  # [web:90][web:86]
+
+
+def summarize_numeric(series):
+    s = series.dropna()
+    if s.empty:
+        return dict(mean=np.nan, std=np.nan, cv=np.nan, min=np.nan, max=np.nan, count=0, rng=np.nan)
+    return dict(
+        mean=float(s.mean()),
+        std=float(s.std(ddof=1)),
+        cv=coefficient_of_variation(s),
+        min=float(s.min()),
+        max=float(s.max()),
+        count=int(s.shape[0]),
+        rng=float(s.max() - s.min()),
+    )
+
+
+# ----------------------------
+# Sheet-specific analyzers
+# ----------------------------
+def analyze_overall(df):
+    """
+    Overall sheet: compute summary stats for all numeric columns,
+    plus rolling volatility if a time column exists.
+    """
+    df = normalize_columns(df).dropna(how="all").dropna(axis=1, how="all")
+    # Try to detect a time column
+    time_col = identify_cols(df, ["month", "date", "period", "month_year"])
+    if time_col and not np.issubdtype(df[time_col].dtype, np.number):
+        # attempt to parse datetime
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            try:
+                df[time_col] = pd.to_datetime(df[time_col], errors="coerce")
+            except Exception:
+                pass
+
+    numeric_cols = df.select_dtypes(include=[np.number]).columns.tolist()
+    out = {}
+    for col in numeric_cols:
+        out[col] = summarize_numeric(df[col])
+
+    overall_summary = pd.DataFrame(out).T
+    overall_summary.index.name = "metric"
+
+    # Rolling analysis (optional) if time col exists and is usable
+    rolling_summary = None
+    if time_col is not None:
+        df = df.sort_values(by=time_col)
+        rolling_dict = {}
+        for col in numeric_cols:
+            rs = rolling_std(df[col], window=3, min_periods=3)  # 3-period rolling [web:84]
+            rolling_dict[col] = dict(
+                avg_rolling_std=float(rs.mean(skipna=True)) if rs.notna().any() else np.nan
+            )
+        rolling_summary = pd.DataFrame(rolling_dict).T
+        rolling_summary.index.name = "metric"
+
+    return overall_summary, rolling_summary
+
+
+def analyze_grouped(df, group_key_candidates):
+    """
+    Generic grouped analyzer for model-wise or family-wise sheets.
+    Detects appropriate grouping key and computes per-group metrics:
+    - Mean, Std, CV, Min, Max, Range for each numeric column
+    Also returns a ranking by highest CV for key metrics if available.
+    """
+    df = normalize_columns(df).dropna(how="all").dropna(axis=1, how="all")
+    group_col = identify_cols(df, group_key_candidates) or df.columns[0]
+
+    numeric_cols = df.select_dtypes(include=[np.number]).columns.tolist()
+    if group_col in numeric_cols:
+        numeric_cols.remove(group_col)
+
+    groups = []
+    for g, gdf in df.groupby(group_col, dropna=True):
+        row = {group_col: g}
+        for col in numeric_cols:
+            stats = summarize_numeric(gdf[col])
+            row[f"{col}_mean"] = stats["mean"]
+            row[f"{col}_std"] = stats["std"]
+            row[f"{col}_cv"] = stats["cv"]
+            row[f"{col}_min"] = stats["min"]
+            row[f"{col}_max"] = stats["max"]
+            row[f"{col}_range"] = stats["rng"]
+        groups.append(row)
+
+    result = pd.DataFrame(groups)
+
+    # Attempt to define a primary metric to rank by CV
+    primary_candidates = ["claim_rate", "cost_per_claim", "combined_metric",
+                          "claims", "total_claims", "cost", "total_cost"]
+    primary = None
+    for base in primary_candidates:
+        if f"{base}_cv" in result.columns:
+            primary = f"{base}_cv"
+            break
+    if primary is None:
+        # fallback: any cv column
+        cv_cols = [c for c in result.columns if c.endswith("_cv")]
+        primary = cv_cols[0] if cv_cols else None
+
+    ranking = None
+    if primary:
+        ranking = result.sort_values(primary, ascending=False).reset_index(drop=True)
+
+    return group_col, result, ranking
+
+
+# ----------------------------
+# Orchestrator
+# ----------------------------
+def analyze_workbook(path):
+    """
+    Analyze the Excel workbook with three sheets:
+    - Overall
+    - Model-wise
+    - Model family-wise
+    Returns a dictionary of DataFrames.
+    """
+    sheets = read_excel_all_sheets(path)  # [web:74]
+    results = {}
+
+    for name, df in sheets.items():
+        name_l = name.lower()
+        if "overall" in name_l:
+            overall_summary, rolling_summary = analyze_overall(df)
+            results[f"{name}_summary"] = overall_summary
+            if rolling_summary is not None:
+                results[f"{name}_rolling"] = rolling_summary
+
+        elif "family" in name_l:
+            group_col, summary, ranking = analyze_grouped(df, ["family", "category", "segment", "class"])
+            results[f"{name}_by_{group_col}"] = summary
+            if ranking is not None:
+                results[f"{name}_ranking_by_cv"] = ranking
+
+        elif "model" in name_l:
+            group_col, summary, ranking = analyze_grouped(df, ["model", "product", "variant", "type"])
+            results[f"{name}_by_{group_col}"] = summary
+            if ranking is not None:
+                results[f"{name}_ranking_by_cv"] = ranking
+
+        else:
+            # Generic analysis if naming doesn't match
+            group_col, summary, ranking = analyze_grouped(df, ["model", "family"])
+            results[f"{name}_by_{group_col}"] = summary
+            if ranking is not None:
+                results[f"{name}_ranking_by_cv"] = ranking
+
+    return results
+
+
+def write_results_to_excel(results, out_path):
+    """
+    Write all result DataFrames to a single Excel file, each as a separate sheet.
+    """
+    with pd.ExcelWriter(out_path, engine="xlsxwriter") as writer:
+        for sheet_name, rdf in results.items():
+            safe_name = str(sheet_name)[:31]  # Excel sheet name limit
+            rdf.to_excel(writer, sheet_name=safe_name, index=True)
+
+
+# ----------------------------
+# CLI
+# ----------------------------
+def main():
+    parser = argparse.ArgumentParser(description="Warranty Volatility Analysis")
+    parser.add_argument("--file", required=True, help="Path to the Excel file with warranty data")
+    parser.add_argument("--out", default="warranty_volatility_report.xlsx", help="Output Excel report path")
+    args = parser.parse_args()
+
+    print(f"Reading workbook: {args.file}")
+    results = analyze_workbook(args.file)
+
+    # Quick console highlights: show top-10 by CV where available
+    for name, df in results.items():
+        if name.endswith("_ranking_by_cv"):
+            print(f"\nTop by volatility (CV): {name}")
+            print(df.head(10))
+
+    print(f"\nWriting report to: {args.out}")
+    write_results_to_excel(results, args.out)
+    print("Done.")
+
+
+if __name__ == "__main__":
+    main()
