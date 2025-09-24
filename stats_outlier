@@ -6,7 +6,7 @@ import xlsxwriter
 
 # --- CONFIG ---
 excel_path = "your_warranty.xlsx"
-output_file = f"Warranty_Statistical_Analysis_{datetime.now().strftime('%Y%m%d')}.xlsx"
+output_file = f"Warranty_Complete_Analysis_{datetime.now().strftime('%Y%m%d')}.xlsx"
 
 # Load and prepare data
 model_df = pd.read_excel(excel_path, sheet_name="MODEL_Analysis")
@@ -98,8 +98,176 @@ def summary_statistics(df, analysis_columns):
     
     return pd.DataFrame(summary)
 
-# --- GENERATE REPORT ---
-def create_statistical_report():
+def generate_model_actionable_insights(model_stats, model_df):
+    """Generate actionable insights for individual models"""
+    insights = []
+    
+    for _, row in model_stats.iterrows():
+        model = row['Model']
+        cost_z = row.get('Cost_per_Claim_ZScore', 0)
+        combined_z = row.get('Combined_Metric_ZScore', 0)
+        cost_percentile = row.get('Cost_per_Claim_Percentile', 50)
+        
+        # Determine priority level
+        priority = "Low"
+        if abs(cost_z) > 2 or abs(combined_z) > 2:
+            priority = "High"
+        elif abs(cost_z) > 1 or abs(combined_z) > 1:
+            priority = "Medium"
+            
+        # Generate specific recommendations
+        recommendations = []
+        potential_savings = 0
+        
+        if cost_z > 2:  # High cost outlier
+            recommendations.append("URGENT: Investigate root causes of high warranty costs")
+            recommendations.append("Review supplier quality and manufacturing processes")
+            recommendations.append("Analyze failure patterns and common repair types")
+            # Estimate potential savings (reduce to 75th percentile)
+            current_cost = row.get('Cost_per_Claim', 0)
+            target_cost = clean_numeric(model_df[cost_per_claim_col]).quantile(0.75)
+            potential_savings = max(0, current_cost - target_cost)
+            
+        elif cost_z > 1:
+            recommendations.append("Monitor warranty cost trends closely")
+            recommendations.append("Benchmark against similar models")
+            
+        if combined_z > 2:  # High combined metric
+            recommendations.append("Address both claim frequency AND cost per claim")
+            recommendations.append("Implement preventive maintenance programs")
+            
+        if cost_percentile > 90:
+            recommendations.append("TOP 10% EXPENSIVE: Immediate cost reduction initiative needed")
+        elif cost_percentile > 75:
+            recommendations.append("Above average costs - identify best practices from lower-cost models")
+            
+        if cost_z < -1:  # Very low cost - learn from these
+            recommendations.append("BENCHMARK MODEL: Study processes for best practices")
+            recommendations.append("Document cost-effective repair procedures")
+            
+        # Business impact assessment
+        impact = "Low"
+        if cost_percentile > 90 or abs(cost_z) > 2:
+            impact = "High"
+        elif cost_percentile > 75 or abs(cost_z) > 1:
+            impact = "Medium"
+            
+        insights.append({
+            'Model': model,
+            'Priority': priority,
+            'Business_Impact': impact,
+            'Cost_Percentile': f"{cost_percentile:.1f}%",
+            'Cost_Z_Score': f"{cost_z:.2f}",
+            'Key_Issue': "High warranty costs" if cost_z > 1 else "Cost volatility" if abs(combined_z) > 1 else "Monitor trends",
+            'Primary_Recommendation': recommendations[0] if recommendations else "Continue monitoring",
+            'Secondary_Actions': " | ".join(recommendations[1:3]) if len(recommendations) > 1 else "None",
+            'Estimated_Annual_Savings': potential_savings * row.get('Number of Records Where Warranty Came In', 0) if 'Number of Records Where Warranty Came In' in row else 0,
+            'Next_Review_Date': (datetime.now() + pd.DateOffset(months=1 if priority == "High" else 3)).strftime('%Y-%m-%d')
+        })
+    
+    return pd.DataFrame(insights)
+
+def generate_family_actionable_insights(family_stats, family_df):
+    """Generate actionable insights for model families"""
+    insights = []
+    
+    for _, row in family_stats.iterrows():
+        family = row[family_col]
+        cost_z = row.get('Cost_per_Claim_ZScore', 0)
+        combined_z = row.get('Combined_Metric_ZScore', 0)
+        cost_percentile = row.get('Cost_per_Claim_Percentile', 50)
+        
+        # Strategic recommendations for families
+        recommendations = []
+        strategic_actions = []
+        
+        if cost_z > 2:
+            recommendations.append("STRATEGIC REVIEW: Entire family requires cost optimization")
+            strategic_actions.append("Cross-model benchmarking within family")
+            strategic_actions.append("Supplier negotiation for family-wide parts")
+            strategic_actions.append("Design standardization opportunities")
+            
+        elif cost_z > 1:
+            recommendations.append("Family-level cost improvement program")
+            strategic_actions.append("Share best practices across models in family")
+            
+        if combined_z > 2:
+            recommendations.append("Family-wide quality improvement initiative")
+            strategic_actions.append("Common failure mode analysis")
+            strategic_actions.append("Preventive maintenance standardization")
+            
+        # Investment priority
+        investment_priority = "Low"
+        if cost_percentile > 90:
+            investment_priority = "Critical"
+        elif cost_percentile > 75:
+            investment_priority = "High"
+        elif cost_percentile > 60:
+            investment_priority = "Medium"
+            
+        insights.append({
+            'Model_Family': family,
+            'Investment_Priority': investment_priority,
+            'Cost_Position': f"Top {100-cost_percentile:.0f}%" if cost_percentile > 50 else f"Bottom {cost_percentile:.0f}%",
+            'Strategic_Focus': recommendations[0] if recommendations else "Maintain current performance",
+            'Cross_Model_Opportunities': strategic_actions[0] if strategic_actions else "Limited opportunities",
+            'Supply_Chain_Actions': strategic_actions[1] if len(strategic_actions) > 1 else "Continue current approach",
+            'Design_Engineering_Focus': strategic_actions[2] if len(strategic_actions) > 2 else "No immediate action needed",
+            'Timeline': "3-6 months" if investment_priority in ["Critical", "High"] else "6-12 months",
+            'Success_Metrics': "Cost per claim reduction >20%" if cost_z > 2 else "Cost per claim reduction >10%" if cost_z > 1 else "Maintain position"
+        })
+    
+    return pd.DataFrame(insights)
+
+def generate_executive_action_plan(model_insights, family_insights):
+    """Generate executive-level action plan"""
+    
+    # Count priorities
+    high_priority_models = len(model_insights[model_insights['Priority'] == 'High'])
+    critical_families = len(family_insights[family_insights['Investment_Priority'] == 'Critical'])
+    
+    # Calculate potential savings
+    total_savings = model_insights['Estimated_Annual_Savings'].sum()
+    
+    action_plan = [
+        {
+            'Priority': '1 - Immediate (30 days)',
+            'Action': 'Address Critical Cost Outliers',
+            'Details': f'Focus on {high_priority_models} high-priority models with Z-score > 2',
+            'Owner': 'Quality Engineering + Supply Chain',
+            'Expected_Impact': f'₹{total_savings:,.0f} annual savings potential',
+            'Success_Metrics': 'Reduce outlier costs by 25%'
+        },
+        {
+            'Priority': '2 - Short-term (90 days)', 
+            'Action': 'Family-Level Cost Optimization',
+            'Details': f'Strategic review of {critical_families} critical investment priority families',
+            'Owner': 'Product Management + Engineering',
+            'Expected_Impact': 'Standardization and economies of scale',
+            'Success_Metrics': 'Family-wide cost reduction >15%'
+        },
+        {
+            'Priority': '3 - Medium-term (6 months)',
+            'Action': 'Best Practice Standardization',
+            'Details': 'Replicate low-cost model processes across portfolio',
+            'Owner': 'Operations + Quality',
+            'Expected_Impact': 'Systematic cost reduction',
+            'Success_Metrics': 'CV% reduction across all metrics'
+        },
+        {
+            'Priority': '4 - Long-term (12 months)',
+            'Action': 'Predictive Cost Management',
+            'Details': 'Implement monitoring system for early cost escalation detection',
+            'Owner': 'Analytics + Quality',
+            'Expected_Impact': 'Proactive cost control',
+            'Success_Metrics': 'Reduce cost volatility by 30%'
+        }
+    ]
+    
+    return pd.DataFrame(action_plan)
+
+# --- GENERATE COMPREHENSIVE REPORT ---
+def create_comprehensive_report():
     writer = pd.ExcelWriter(output_file, engine='xlsxwriter')
     workbook = writer.book
     
@@ -115,75 +283,92 @@ def create_statistical_report():
     
     currency_format = workbook.add_format({'num_format': '#,##0.00', 'align': 'right'})
     decimal_format = workbook.add_format({'num_format': '0.00', 'align': 'right'})
-    percentage_format = workbook.add_format({'num_format': '0.00%', 'align': 'right'})
+    critical_format = workbook.add_format({'bg_color': '#FF6B6B', 'font_color': 'white', 'bold': True})
+    high_format = workbook.add_format({'bg_color': '#FFB347', 'font_color': 'black'})
+    medium_format = workbook.add_format({'bg_color': '#FFEB9C', 'font_color': 'black'})
     
     # Analysis columns
     analysis_columns = [cost_per_claim_col, combined_metric_col, claim_rate_col, num_records_col, vehicles_col]
     
-    # 1. MODEL STATISTICAL ANALYSIS
+    # Generate all analyses
     model_stats = statistical_analysis(model_df, 'Model', analysis_columns)
-    model_stats.to_excel(writer, sheet_name='Model_Statistics', index=False)
-    
-    model_sheet = writer.sheets['Model_Statistics']
-    model_sheet.set_row(0, None, header_format)
-    model_sheet.set_column('A:A', 25)  # Model names
-    
-    # Format numeric columns
-    for col_idx in range(1, len(model_stats.columns)):
-        col_name = model_stats.columns[col_idx]
-        if 'Cost' in col_name or 'Combined_Metric' in col_name:
-            model_sheet.set_column(col_idx, col_idx, 15, currency_format)
-        elif 'Percentile' in col_name:
-            model_sheet.set_column(col_idx, col_idx, 12, decimal_format)
-        else:
-            model_sheet.set_column(col_idx, col_idx, 12, decimal_format)
-    
-    # 2. FAMILY STATISTICAL ANALYSIS
     family_stats = statistical_analysis(family_df, family_col, analysis_columns)
-    family_stats.to_excel(writer, sheet_name='Family_Statistics', index=False)
-    
-    family_sheet = writer.sheets['Family_Statistics']
-    family_sheet.set_row(0, None, header_format)
-    family_sheet.set_column('A:A', 25)  # Family names
-    
-    # Format numeric columns
-    for col_idx in range(1, len(family_stats.columns)):
-        col_name = family_stats.columns[col_idx]
-        if 'Cost' in col_name or 'Combined_Metric' in col_name:
-            family_sheet.set_column(col_idx, col_idx, 15, currency_format)
-        elif 'Percentile' in col_name:
-            family_sheet.set_column(col_idx, col_idx, 12, decimal_format)
-        else:
-            family_sheet.set_column(col_idx, col_idx, 12, decimal_format)
-    
-    # 3. SUMMARY STATISTICS - MODELS
     model_summary = summary_statistics(model_df, analysis_columns)
-    model_summary.to_excel(writer, sheet_name='Model_Summary', index=False)
-    
-    model_sum_sheet = writer.sheets['Model_Summary']
-    model_sum_sheet.set_row(0, None, header_format)
-    model_sum_sheet.set_column('A:A', 20)  # Metric names
-    for col_idx in range(1, len(model_summary.columns)):
-        if 'CV_Percent' in model_summary.columns[col_idx]:
-            model_sum_sheet.set_column(col_idx, col_idx, 12, decimal_format)
-        else:
-            model_sum_sheet.set_column(col_idx, col_idx, 15, currency_format)
-    
-    # 4. SUMMARY STATISTICS - FAMILIES
     family_summary = summary_statistics(family_df, analysis_columns)
-    family_summary.to_excel(writer, sheet_name='Family_Summary', index=False)
     
-    family_sum_sheet = writer.sheets['Family_Summary']
-    family_sum_sheet.set_row(0, None, header_format)
-    family_sum_sheet.set_column('A:A', 20)  # Metric names
-    for col_idx in range(1, len(family_summary.columns)):
-        if 'CV_Percent' in family_summary.columns[col_idx]:
-            family_sum_sheet.set_column(col_idx, col_idx, 12, decimal_format)
-        else:
-            family_sum_sheet.set_column(col_idx, col_idx, 15, currency_format)
+    # Generate actionable insights
+    model_insights = generate_model_actionable_insights(model_stats, model_df)
+    family_insights = generate_family_actionable_insights(family_stats, family_df)
+    action_plan = generate_executive_action_plan(model_insights, family_insights)
     
-    # 5. TOP/BOTTOM PERFORMERS
-    # Top 10 Cost per Claim
+    # 1. EXECUTIVE ACTION PLAN SHEET
+    action_plan.to_excel(writer, sheet_name='Executive_Action_Plan', index=False)
+    action_sheet = writer.sheets['Executive_Action_Plan']
+    action_sheet.set_row(0, None, header_format)
+    action_sheet.set_column('A:A', 20)
+    action_sheet.set_column('B:B', 30)
+    action_sheet.set_column('C:C', 50)
+    action_sheet.set_column('D:D', 25)
+    action_sheet.set_column('E:E', 25)
+    action_sheet.set_column('F:F', 25)
+    
+    # 2. MODEL ACTIONABLE INSIGHTS
+    model_insights.to_excel(writer, sheet_name='Model_Action_Items', index=False)
+    model_action_sheet = writer.sheets['Model_Action_Items']
+    model_action_sheet.set_row(0, None, header_format)
+    model_action_sheet.set_column('A:A', 25)
+    model_action_sheet.set_column('B:B', 12)
+    model_action_sheet.set_column('C:C', 15)
+    model_action_sheet.set_column('D:G', 20)
+    model_action_sheet.set_column('H:H', 40)
+    model_action_sheet.set_column('I:I', 20, currency_format)
+    model_action_sheet.set_column('J:J', 15)
+    
+    # Apply priority-based formatting
+    for row_idx, priority in enumerate(model_insights['Priority'], start=1):
+        if priority == 'High':
+            model_action_sheet.set_row(row_idx, None, critical_format)
+        elif priority == 'Medium':
+            model_action_sheet.set_row(row_idx, None, high_format)
+    
+    # 3. FAMILY STRATEGIC INSIGHTS
+    family_insights.to_excel(writer, sheet_name='Family_Strategy', index=False)
+    family_strategy_sheet = writer.sheets['Family_Strategy']
+    family_strategy_sheet.set_row(0, None, header_format)
+    family_strategy_sheet.set_column('A:A', 25)
+    family_strategy_sheet.set_column('B:B', 15)
+    family_strategy_sheet.set_column('C:I', 30)
+    
+    # Apply investment priority formatting
+    for row_idx, priority in enumerate(family_insights['Investment_Priority'], start=1):
+        if priority == 'Critical':
+            family_strategy_sheet.set_row(row_idx, None, critical_format)
+        elif priority == 'High':
+            family_strategy_sheet.set_row(row_idx, None, high_format)
+        elif priority == 'Medium':
+            family_strategy_sheet.set_row(row_idx, None, medium_format)
+    
+    # 4-9. ORIGINAL STATISTICAL SHEETS
+    sheets_data = [
+        ('Model_Statistics', model_stats),
+        ('Family_Statistics', family_stats), 
+        ('Model_Summary', model_summary),
+        ('Family_Summary', family_summary)
+    ]
+    
+    for sheet_name, data in sheets_data:
+        data.to_excel(writer, sheet_name=sheet_name, index=False)
+        sheet = writer.sheets[sheet_name]
+        sheet.set_row(0, None, header_format)
+        sheet.set_column('A:A', 25)
+        for col_idx in range(1, len(data.columns)):
+            col_name = data.columns[col_idx]
+            if 'Cost' in col_name or 'Combined_Metric' in col_name:
+                sheet.set_column(col_idx, col_idx, 15, currency_format)
+            else:
+                sheet.set_column(col_idx, col_idx, 12, decimal_format)
+    
+    # TOP/BOTTOM PERFORMERS
     if cost_per_claim_col in model_df.columns:
         model_df_clean = model_df.copy()
         model_df_clean[cost_per_claim_col] = clean_numeric(model_df_clean[cost_per_claim_col])
@@ -194,7 +379,6 @@ def create_statistical_report():
         bottom_cost = model_df_clean.nsmallest(10, cost_per_claim_col)[['Model', cost_per_claim_col, combined_metric_col]]
         bottom_cost.to_excel(writer, sheet_name='Bottom_Cost_Models', index=False)
         
-        # Format these sheets
         for sheet_name in ['Top_Cost_Models', 'Bottom_Cost_Models']:
             sheet = writer.sheets[sheet_name]
             sheet.set_row(0, None, header_format)
@@ -202,32 +386,40 @@ def create_statistical_report():
             sheet.set_column('B:C', 15, currency_format)
     
     writer.close()
-    print(f"Statistical analysis saved as: {output_file}")
+    print(f"Comprehensive analysis with actionable insights saved as: {output_file}")
 
 # Generate the report
-create_statistical_report()
+create_comprehensive_report()
 
 print(f"""
-📊 STATISTICAL ANALYSIS CREATED: {output_file}
+🚀 COMPREHENSIVE BUSINESS ANALYSIS CREATED: {output_file}
 
-📋 SHEETS INCLUDED:
-1. Model_Statistics    - Z-scores, percentiles, vs mean for all models
-2. Family_Statistics   - Z-scores, percentiles, vs mean for all families
-3. Model_Summary      - Mean, std dev, CV%, quartiles for model metrics
-4. Family_Summary     - Mean, std dev, CV%, quartiles for family metrics
-5. Top_Cost_Models    - 10 highest cost per claim models
-6. Bottom_Cost_Models - 10 lowest cost per claim models
+📋 NEW ACTIONABLE INSIGHTS SHEETS:
+1. Executive_Action_Plan   - 4-phase strategic action plan with timelines & owners
+2. Model_Action_Items     - Specific recommendations for each model with savings estimates  
+3. Family_Strategy        - Strategic initiatives for each model family
 
-📈 STATISTICAL METRICS INCLUDED:
-• Actual Values
-• Z-Scores (how many std devs from mean)
-• Percentiles (ranking among all models/families)
-• Difference vs Mean
-• Summary statistics (mean, std dev, CV%, quartiles)
+📈 ORIGINAL STATISTICAL SHEETS:
+4. Model_Statistics       - Z-scores, percentiles for all models
+5. Family_Statistics      - Z-scores, percentiles for all families
+6. Model_Summary         - Statistical overview of model metrics
+7. Family_Summary        - Statistical overview of family metrics
+8. Top_Cost_Models       - 10 highest cost models
+9. Bottom_Cost_Models    - 10 lowest cost models (benchmarks)
 
-🔍 KEY INSIGHTS:
-• Z-Score > 2: Statistically significant outlier
-• Percentile > 90: Top 10% performer
-• CV% > 30: High variability metric
-• Use for identifying patterns and outliers
+🎯 ACTIONABLE INSIGHTS INCLUDE:
+• Priority levels (High/Medium/Low) with color coding
+• Specific recommendations for each model/family
+• Estimated annual savings potential
+• Timeline for action (30/90/180/365 days)
+• Responsible owners (Quality, Supply Chain, Engineering)
+• Success metrics and KPIs
+• Strategic vs operational actions
+
+💼 BUSINESS VALUE:
+• Clear priorities for management attention
+• Quantified savings opportunities
+• Strategic roadmap for cost optimization
+• Benchmarking opportunities from best performers
+• Risk mitigation for high-cost outliers
 """)
