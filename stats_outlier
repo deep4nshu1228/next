@@ -512,3 +512,568 @@ print(f"""
 • Actionable insights with clear priorities and timelines
 • Benchmark identification for best practice sharing
 """)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+############################################ V2
+
+
+import pandas as pd
+import numpy as np
+from scipy import stats
+from datetime import datetime
+import xlsxwriter
+
+# --- CONFIG ---
+excel_path = "your_warranty.xlsx"
+output_file = f"Warranty_Complete_Analysis_{datetime.now().strftime('%Y%m%d')}.xlsx"
+
+# Load and prepare data
+model_df = pd.read_excel(excel_path, sheet_name="MODEL_Analysis")
+family_df = pd.read_excel(excel_path, sheet_name="MODEL_FAMILY_Analysis")
+
+# Column definitions
+cost_per_claim_col = "Cost per Claim (Cost / Number of Warranty Claims)."
+combined_metric_col = "Combined Metric (Rate * Cost per Claim)"
+claim_rate_col = "Claims Rate (Number of Warranty Claims / Total Vehicles in Warranty)"
+num_records_col = "Number of Records Where Warranty Came In"
+vehicles_col = "Total Vehicles in Warranty"
+
+family_col = "Model Family"
+
+# --- ANALYSIS FUNCTIONS ---
+def clean_numeric(series):
+    return pd.to_numeric(series.astype(str).str.replace(",", "").str.replace("₹", "").str.strip(), errors="coerce")
+
+def create_enhanced_ranking_table(df, group_col, sort_col, n_top=10, ascending=False):
+    """Create ranking table with Z-scores and statistical analysis"""
+    
+    # Clean the data
+    df_clean = df.copy()
+    df_clean[sort_col] = clean_numeric(df_clean[sort_col])
+    df_clean = df_clean.dropna(subset=[sort_col])
+    
+    # Calculate overall statistics for Z-score
+    overall_mean = df_clean[sort_col].mean()
+    overall_std = df_clean[sort_col].std()
+    
+    # Get top/bottom performers
+    if ascending:
+        ranked_df = df_clean.nsmallest(n_top, sort_col)
+        rank_type = "LOWEST"
+    else:
+        ranked_df = df_clean.nlargest(n_top, sort_col)
+        rank_type = "HIGHEST"
+    
+    # Add statistical analysis columns
+    enhanced_df = ranked_df.copy()
+    enhanced_df['Z_Score'] = (enhanced_df[sort_col] - overall_mean) / overall_std
+    enhanced_df['Percentile'] = enhanced_df[sort_col].apply(lambda x: stats.percentileofscore(df_clean[sort_col], x))
+    enhanced_df['vs_Mean'] = enhanced_df[sort_col] - overall_mean
+    enhanced_df['vs_Median'] = enhanced_df[sort_col] - df_clean[sort_col].median()
+    
+    # Add additional cost metrics if available
+    cost_cols = [cost_per_claim_col, combined_metric_col, claim_rate_col]
+    available_cols = [col for col in cost_cols if col in enhanced_df.columns]
+    
+    # Select columns for output
+    output_cols = [group_col, sort_col, 'Z_Score', 'Percentile', 'vs_Mean', 'vs_Median']
+    
+    # Add other cost metrics
+    for col in available_cols:
+        if col != sort_col:
+            output_cols.append(col)
+    
+    # Add volume metrics if available
+    volume_cols = [num_records_col, vehicles_col]
+    for col in volume_cols:
+        if col in enhanced_df.columns:
+            output_cols.append(col)
+    
+    # Filter to available columns
+    final_cols = [col for col in output_cols if col in enhanced_df.columns]
+    
+    return enhanced_df[final_cols], rank_type
+
+def statistical_analysis(df, group_col, analysis_columns):
+    """Generate statistical analysis for all models/families"""
+    
+    # Get overall statistics for calculating Z-scores
+    overall_stats = {}
+    for col in analysis_columns:
+        if col in df.columns:
+            clean_values = clean_numeric(df[col])
+            overall_stats[col] = {
+                'mean': clean_values.mean(),
+                'std': clean_values.std()
+            }
+    
+    # Analyze each group (model/family)
+    results = []
+    
+    for group_name in df[group_col].unique():
+        if pd.isna(group_name):
+            continue
+            
+        group_data = df[df[group_col] == group_name]
+        row = {group_col: group_name}
+        
+        for col in analysis_columns:
+            if col in df.columns:
+                value = clean_numeric(group_data[col]).iloc[0] if len(group_data) > 0 else np.nan
+                
+                # Clean column name
+                clean_col_name = col.replace('(Cost / Number of Warranty Claims).', 'Cost_per_Claim').replace('(Rate * Cost per Claim)', 'Combined_Metric').replace('(Number of Warranty Claims / Total Vehicles in Warranty)', 'Claims_Rate')
+                
+                if not pd.isna(value) and col in overall_stats:
+                    # Calculate Z-score
+                    z_score = (value - overall_stats[col]['mean']) / overall_stats[col]['std'] if overall_stats[col]['std'] != 0 else 0
+                    
+                    # Calculate percentile rank
+                    all_values = clean_numeric(df[col]).dropna()
+                    percentile = stats.percentileofscore(all_values, value)
+                    
+                    # Add metrics
+                    row[f'{clean_col_name}'] = value
+                    row[f'{clean_col_name}_ZScore'] = z_score
+                    row[f'{clean_col_name}_Percentile'] = percentile
+                    row[f'{clean_col_name}_vs_Mean'] = value - overall_stats[col]['mean']
+                    
+        results.append(row)
+    
+    return pd.DataFrame(results)
+
+def summary_statistics(df, analysis_columns):
+    """Generate summary statistics table"""
+    summary = []
+    
+    for col in analysis_columns:
+        if col in df.columns:
+            clean_values = clean_numeric(df[col])
+            clean_col_name = col.replace('(Cost / Number of Warranty Claims).', 'Cost_per_Claim').replace('(Rate * Cost per Claim)', 'Combined_Metric').replace('(Number of Warranty Claims / Total Vehicles in Warranty)', 'Claims_Rate')
+            
+            summary.append({
+                'Metric': clean_col_name,
+                'Count': clean_values.count(),
+                'Mean': clean_values.mean(),
+                'Std_Dev': clean_values.std(),
+                'CV_Percent': (clean_values.std() / clean_values.mean()) * 100 if clean_values.mean() != 0 else 0,
+                'Min': clean_values.min(),
+                'Q1': clean_values.quantile(0.25),
+                'Median': clean_values.median(),
+                'Q3': clean_values.quantile(0.75),
+                'Max': clean_values.max(),
+                'Range': clean_values.max() - clean_values.min()
+            })
+    
+    return pd.DataFrame(summary)
+
+def generate_model_actionable_insights(model_stats, model_df):
+    """Generate actionable insights for individual models"""
+    insights = []
+    
+    for _, row in model_stats.iterrows():
+        model = row['Model']
+        cost_z = row.get('Cost_per_Claim_ZScore', 0)
+        claims_z = row.get('Claims_Rate_ZScore', 0)
+        combined_z = row.get('Combined_Metric_ZScore', 0)
+        cost_percentile = row.get('Cost_per_Claim_Percentile', 50)
+        claims_percentile = row.get('Claims_Rate_Percentile', 50)
+        
+        # Determine priority level
+        priority = "Low"
+        if abs(cost_z) > 2 or abs(claims_z) > 2 or abs(combined_z) > 2:
+            priority = "High"
+        elif abs(cost_z) > 1 or abs(claims_z) > 1 or abs(combined_z) > 1:
+            priority = "Medium"
+            
+        # Generate specific recommendations
+        recommendations = []
+        potential_savings = 0
+        
+        if cost_z > 2:  # High cost outlier
+            recommendations.append("URGENT: Investigate root causes of high warranty costs")
+            recommendations.append("Review supplier quality and manufacturing processes")
+            current_cost = row.get('Cost_per_Claim', 0)
+            target_cost = clean_numeric(model_df[cost_per_claim_col]).quantile(0.75)
+            potential_savings = max(0, current_cost - target_cost)
+            
+        if claims_z > 2:  # High claims frequency
+            recommendations.append("CRITICAL: Address high claim frequency - quality issue likely")
+            recommendations.append("Implement enhanced quality controls and testing")
+            
+        if combined_z > 2:  # High combined metric
+            recommendations.append("Address both claim frequency AND cost per claim")
+            recommendations.append("Implement preventive maintenance programs")
+            
+        if cost_percentile > 90 or claims_percentile > 90:
+            recommendations.append("TOP 10% PERFORMER: Immediate action required")
+        elif cost_percentile > 75 or claims_percentile > 75:
+            recommendations.append("Above average - benchmark against better performers")
+            
+        if cost_z < -1 and claims_z < -1:  # Very good performer
+            recommendations.append("BENCHMARK MODEL: Study processes for best practices")
+            recommendations.append("Document cost-effective and quality procedures")
+            
+        # Business impact assessment
+        impact = "Low"
+        if (cost_percentile > 90 or claims_percentile > 90) or (abs(cost_z) > 2 or abs(claims_z) > 2):
+            impact = "High"
+        elif (cost_percentile > 75 or claims_percentile > 75) or (abs(cost_z) > 1 or abs(claims_z) > 1):
+            impact = "Medium"
+            
+        # Determine key issue type
+        key_issue = "Monitor trends"
+        if claims_z > 2:
+            key_issue = "High claim frequency (quality issue)"
+        elif cost_z > 2:
+            key_issue = "High warranty costs"
+        elif abs(combined_z) > 2:
+            key_issue = "Combined cost & frequency issue"
+        elif claims_z > 1:
+            key_issue = "Elevated claim rate"
+        elif cost_z > 1:
+            key_issue = "Above average costs"
+            
+        insights.append({
+            'Model': model,
+            'Priority': priority,
+            'Business_Impact': impact,
+            'Cost_Percentile': f"{cost_percentile:.1f}%",
+            'Claims_Percentile': f"{claims_percentile:.1f}%",
+            'Cost_Z_Score': f"{cost_z:.2f}",
+            'Claims_Z_Score': f"{claims_z:.2f}",
+            'Key_Issue': key_issue,
+            'Primary_Recommendation': recommendations[0] if recommendations else "Continue monitoring",
+            'Secondary_Actions': " | ".join(recommendations[1:3]) if len(recommendations) > 1 else "None",
+            'Estimated_Annual_Savings': potential_savings * row.get('Cost_per_Claim', 0) if 'Cost_per_Claim' in row else 0,
+            'Next_Review_Date': (datetime.now() + pd.DateOffset(months=1 if priority == "High" else 3)).strftime('%Y-%m-%d')
+        })
+    
+    return pd.DataFrame(insights)
+
+def generate_family_actionable_insights(family_stats, family_df):
+    """Generate actionable insights for model families"""
+    insights = []
+    
+    for _, row in family_stats.iterrows():
+        family = row[family_col]
+        cost_z = row.get('Cost_per_Claim_ZScore', 0)
+        claims_z = row.get('Claims_Rate_ZScore', 0)
+        combined_z = row.get('Combined_Metric_ZScore', 0)
+        cost_percentile = row.get('Cost_per_Claim_Percentile', 50)
+        claims_percentile = row.get('Claims_Rate_Percentile', 50)
+        
+        # Strategic recommendations for families
+        recommendations = []
+        strategic_actions = []
+        
+        if cost_z > 2:
+            recommendations.append("STRATEGIC REVIEW: Entire family requires cost optimization")
+            strategic_actions.append("Cross-model benchmarking within family")
+            strategic_actions.append("Supplier negotiation for family-wide parts")
+            
+        if claims_z > 2:
+            recommendations.append("FAMILY QUALITY CRISIS: Systematic design/manufacturing review needed")
+            strategic_actions.append("Family-wide quality audit and process standardization")
+            strategic_actions.append("Common failure mode analysis across all models")
+            
+        if combined_z > 2:
+            recommendations.append("Family-wide quality improvement initiative")
+            strategic_actions.append("Preventive maintenance standardization")
+            
+        # Investment priority based on both cost and claims
+        investment_priority = "Low"
+        max_percentile = max(cost_percentile, claims_percentile)
+        if max_percentile > 90:
+            investment_priority = "Critical"
+        elif max_percentile > 75:
+            investment_priority = "High"
+        elif max_percentile > 60:
+            investment_priority = "Medium"
+            
+        insights.append({
+            'Model_Family': family,
+            'Investment_Priority': investment_priority,
+            'Cost_Position': f"Top {100-cost_percentile:.0f}%" if cost_percentile > 50 else f"Bottom {cost_percentile:.0f}%",
+            'Claims_Position': f"Top {100-claims_percentile:.0f}%" if claims_percentile > 50 else f"Bottom {claims_percentile:.0f}%",
+            'Strategic_Focus': recommendations[0] if recommendations else "Maintain current performance",
+            'Quality_Actions': strategic_actions[0] if strategic_actions else "Continue current quality processes",
+            'Supply_Chain_Actions': strategic_actions[1] if len(strategic_actions) > 1 else "Continue current approach",
+            'Timeline': "3-6 months" if investment_priority in ["Critical", "High"] else "6-12 months",
+            'Success_Metrics': "Cost reduction >20% + Claims reduction >25%" if cost_z > 2 and claims_z > 2 else "Cost reduction >15%" if cost_z > 2 else "Claims reduction >20%" if claims_z > 2 else "Maintain position"
+        })
+    
+    return pd.DataFrame(insights)
+
+def generate_executive_action_plan(model_insights, family_insights):
+    """Generate executive-level action plan"""
+    
+    # Count priorities
+    high_priority_models = len(model_insights[model_insights['Priority'] == 'High'])
+    critical_families = len(family_insights[family_insights['Investment_Priority'] == 'Critical'])
+    
+    # Calculate potential savings
+    total_savings = model_insights['Estimated_Annual_Savings'].sum()
+    
+    action_plan = [
+        {
+            'Priority': '1 - Immediate (30 days)',
+            'Action': 'Address Critical Cost & Claims Outliers',
+            'Details': f'Focus on {high_priority_models} high-priority models with Z-score > 2 (cost or claims)',
+            'Owner': 'Quality Engineering + Supply Chain',
+            'Expected_Impact': f'₹{total_savings:,.0f} annual savings potential + quality improvement',
+            'Success_Metrics': 'Reduce outlier costs by 25% + claims by 20%'
+        },
+        {
+            'Priority': '2 - Short-term (90 days)', 
+            'Action': 'Family-Level Cost & Quality Optimization',
+            'Details': f'Strategic review of {critical_families} critical families (cost + claims analysis)',
+            'Owner': 'Product Management + Engineering + Quality',
+            'Expected_Impact': 'Standardization and systematic quality improvement',
+            'Success_Metrics': 'Family-wide cost reduction >15% + claims reduction >20%'
+        },
+        {
+            'Priority': '3 - Medium-term (6 months)',
+            'Action': 'Best Practice Standardization',
+            'Details': 'Replicate low-cost, low-claims model processes across portfolio',
+            'Owner': 'Operations + Quality',
+            'Expected_Impact': 'Systematic cost and quality improvement',
+            'Success_Metrics': 'CV% reduction across cost and claims metrics'
+        },
+        {
+            'Priority': '4 - Long-term (12 months)',
+            'Action': 'Predictive Cost & Quality Management',
+            'Details': 'Implement monitoring for early cost escalation and quality issue detection',
+            'Owner': 'Analytics + Quality',
+            'Expected_Impact': 'Proactive cost control and quality assurance',
+            'Success_Metrics': 'Reduce cost & claims volatility by 30%'
+        }
+    ]
+    
+    return pd.DataFrame(action_plan)
+
+# --- GENERATE COMPREHENSIVE REPORT ---
+def create_comprehensive_report():
+    writer = pd.ExcelWriter(output_file, engine='xlsxwriter')
+    workbook = writer.book
+    
+    # Define formats
+    header_format = workbook.add_format({
+        'bold': True,
+        'text_wrap': True,
+        'valign': 'top',
+        'fg_color': '#4472C4',
+        'font_color': 'white',
+        'border': 1
+    })
+    
+    currency_format = workbook.add_format({'num_format': '#,##0.00', 'align': 'right'})
+    percentage_format = workbook.add_format({'num_format': '0.00%', 'align': 'right'})
+    decimal_format = workbook.add_format({'num_format': '0.00', 'align': 'right'})
+    critical_format = workbook.add_format({'bg_color': '#FF6B6B', 'font_color': 'white', 'bold': True})
+    high_format = workbook.add_format({'bg_color': '#FFB347', 'font_color': 'black'})
+    medium_format = workbook.add_format({'bg_color': '#FFEB9C', 'font_color': 'black'})
+    good_format = workbook.add_format({'bg_color': '#90EE90', 'font_color': 'black'})
+    
+    # Analysis columns
+    analysis_columns = [cost_per_claim_col, combined_metric_col, claim_rate_col, num_records_col, vehicles_col]
+    
+    # Generate all analyses
+    model_stats = statistical_analysis(model_df, 'Model', analysis_columns)
+    family_stats = statistical_analysis(family_df, family_col, analysis_columns)
+    model_summary = summary_statistics(model_df, analysis_columns)
+    family_summary = summary_statistics(family_df, analysis_columns)
+    
+    # Generate actionable insights
+    model_insights = generate_model_actionable_insights(model_stats, model_df)
+    family_insights = generate_family_actionable_insights(family_stats, family_df)
+    action_plan = generate_executive_action_plan(model_insights, family_insights)
+    
+    # 1. EXECUTIVE ACTION PLAN SHEET
+    action_plan.to_excel(writer, sheet_name='Executive_Action_Plan', index=False)
+    action_sheet = writer.sheets['Executive_Action_Plan']
+    action_sheet.set_row(0, None, header_format)
+    action_sheet.set_column('A:A', 20)
+    action_sheet.set_column('B:B', 30)
+    action_sheet.set_column('C:C', 60)
+    action_sheet.set_column('D:D', 30)
+    action_sheet.set_column('E:E', 30)
+    action_sheet.set_column('F:F', 30)
+    
+    # 2. MODEL ACTIONABLE INSIGHTS
+    model_insights.to_excel(writer, sheet_name='Model_Action_Items', index=False)
+    model_action_sheet = writer.sheets['Model_Action_Items']
+    model_action_sheet.set_row(0, None, header_format)
+    model_action_sheet.set_column('A:A', 25)
+    model_action_sheet.set_column('B:C', 12)
+    model_action_sheet.set_column('D:G', 15)
+    model_action_sheet.set_column('H:H', 30)
+    model_action_sheet.set_column('I:I', 40)
+    model_action_sheet.set_column('J:J', 40)
+    model_action_sheet.set_column('K:K', 20, currency_format)
+    model_action_sheet.set_column('L:L', 15)
+    
+    # Apply priority-based formatting
+    for row_idx, priority in enumerate(model_insights['Priority'], start=1):
+        if priority == 'High':
+            model_action_sheet.set_row(row_idx, None, critical_format)
+        elif priority == 'Medium':
+            model_action_sheet.set_row(row_idx, None, high_format)
+    
+    # 3. FAMILY STRATEGIC INSIGHTS
+    family_insights.to_excel(writer, sheet_name='Family_Strategy', index=False)
+    family_strategy_sheet = writer.sheets['Family_Strategy']
+    family_strategy_sheet.set_row(0, None, header_format)
+    family_strategy_sheet.set_column('A:A', 25)
+    family_strategy_sheet.set_column('B:B', 15)
+    family_strategy_sheet.set_column('C:I', 35)
+    
+    # Apply investment priority formatting
+    for row_idx, priority in enumerate(family_insights['Investment_Priority'], start=1):
+        if priority == 'Critical':
+            family_strategy_sheet.set_row(row_idx, None, critical_format)
+        elif priority == 'High':
+            family_strategy_sheet.set_row(row_idx, None, high_format)
+        elif priority == 'Medium':
+            family_strategy_sheet.set_row(row_idx, None, medium_format)
+    
+    # 4-7. STATISTICAL SHEETS
+    sheets_data = [
+        ('Model_Statistics', model_stats),
+        ('Family_Statistics', family_stats), 
+        ('Model_Summary', model_summary),
+        ('Family_Summary', family_summary)
+    ]
+    
+    for sheet_name, data in sheets_data:
+        data.to_excel(writer, sheet_name=sheet_name, index=False)
+        sheet = writer.sheets[sheet_name]
+        sheet.set_row(0, None, header_format)
+        sheet.set_column('A:A', 25)
+        for col_idx in range(1, len(data.columns)):
+            col_name = data.columns[col_idx]
+            if 'Cost' in col_name or 'Combined_Metric' in col_name:
+                sheet.set_column(col_idx, col_idx, 15, currency_format)
+            elif 'Claims_Rate' in col_name or 'Percentile' in col_name:
+                sheet.set_column(col_idx, col_idx, 12, percentage_format)
+            else:
+                sheet.set_column(col_idx, col_idx, 12, decimal_format)
+    
+    # 8-15. RANKING SHEETS WITH Z-SCORES (COST AND CLAIMS)
+    ranking_configs = []
+    
+    # Cost per claim rankings
+    if cost_per_claim_col in model_df.columns:
+        ranking_configs.extend([
+            (model_df, 'Model', cost_per_claim_col, 'Top_Cost_Models', False),
+            (model_df, 'Model', cost_per_claim_col, 'Bottom_Cost_Models', True)
+        ])
+    
+    if cost_per_claim_col in family_df.columns:
+        ranking_configs.extend([
+            (family_df, family_col, cost_per_claim_col, 'Top_Cost_Families', False),
+            (family_df, family_col, cost_per_claim_col, 'Bottom_Cost_Families', True)
+        ])
+    
+    # Claims rate rankings
+    if claim_rate_col in model_df.columns:
+        ranking_configs.extend([
+            (model_df, 'Model', claim_rate_col, 'Top_Claims_Models', False),
+            (model_df, 'Model', claim_rate_col, 'Bottom_Claims_Models', True)
+        ])
+    
+    if claim_rate_col in family_df.columns:
+        ranking_configs.extend([
+            (family_df, family_col, claim_rate_col, 'Top_Claims_Families', False),
+            (family_df, family_col, claim_rate_col, 'Bottom_Claims_Families', True)
+        ])
+    
+    # Create all ranking sheets
+    for df, group_col, sort_col, sheet_name, ascending in ranking_configs:
+        ranked_data, _ = create_enhanced_ranking_table(df, group_col, sort_col, n_top=10, ascending=ascending)
+        ranked_data.to_excel(writer, sheet_name=sheet_name, index=False)
+        
+        sheet = writer.sheets[sheet_name]
+        sheet.set_row(0, None, header_format)
+        sheet.set_column('A:A', 25)  # Group names
+        
+        # Format based on sort column type
+        if 'Cost' in sort_col:
+            sheet.set_column('B:B', 15, currency_format)  # Sort column
+        else:
+            sheet.set_column('B:B', 15, percentage_format)  # Claims rate
+            
+        sheet.set_column('C:C', 12, decimal_format)   # Z-Score
+        sheet.set_column('D:D', 12, decimal_format)   # Percentile
+        sheet.set_column('E:F', 15, currency_format if 'Cost' in sort_col else percentage_format)  # vs Mean, vs Median
+        
+        # Color code based on Z-scores
+        for row_idx, z_score in enumerate(ranked_data['Z_Score'], start=1):
+            if abs(z_score) > 3:
+                sheet.set_row(row_idx, None, critical_format)
+            elif abs(z_score) > 2:
+                sheet.set_row(row_idx, None, high_format)
+            elif abs(z_score) > 1:
+                sheet.set_row(row_idx, None, medium_format)
+    
+    writer.close()
+    print(f"Comprehensive analysis with cost AND claims rankings saved as: {output_file}")
+
+# Generate the report
+create_comprehensive_report()
+
+print(f"""
+🚀 ENHANCED ANALYSIS WITH CLAIMS RATE RANKINGS: {output_file}
+
+📋 ACTIONABLE INSIGHTS SHEETS:
+1. Executive_Action_Plan   - Updated with cost + claims priorities
+2. Model_Action_Items     - Enhanced with claims rate analysis & Z-scores  
+3. Family_Strategy        - Added claims position & quality actions
+
+📈 STATISTICAL ANALYSIS SHEETS:
+4. Model_Statistics       - Complete Z-scores for all metrics including claims
+5. Family_Statistics      - Complete Z-scores for all metrics including claims
+6. Model_Summary         - Statistical overview including claims rate
+7. Family_Summary        - Statistical overview including claims rate
+
+🏆 COST PERFORMANCE RANKINGS:
+8. Top_Cost_Models       - 10 highest cost models with Z-scores
+9. Bottom_Cost_Models    - 10 lowest cost models (benchmarks)
+10. Top_Cost_Families    - 10 highest cost families with Z-scores
+11. Bottom_Cost_Families - 10 lowest cost families (benchmarks)
+
+🎯 NEW: CLAIMS FREQUENCY RANKINGS:
+12. Top_Claims_Models    - 10 highest claims rate models with Z-scores
+13. Bottom_Claims_Models - 10 lowest claims rate models (quality leaders)
+14. Top_Claims_Families  - 10 highest claims rate families with Z-scores  
+15. Bottom_Claims_Families - 10 lowest claims rate families (quality benchmarks)
+
+💡 BUSINESS VALUE ENHANCEMENT:
+• Separate cost vs quality issue identification
+• Claims rate outliers = potential quality problems
+• Low claims models = quality benchmarking opportunities
+• Combined analysis enables targeted interventions:
+  - High cost only: Supplier/repair cost focus
+  - High claims only: Quality/manufacturing focus  
+  - Both high: Comprehensive quality + cost review
+
+🔍 Z-SCORE INTERPRETATION FOR CLAIMS:
+• Claims Z > 2: Quality crisis - immediate investigation
+• Claims Z < -2: Quality leader - benchmark processes
+• Cost Z > 2: Cost outlier - supplier/repair review
+• Both high: Systemic model issues requiring comprehensive action
+""")
+
