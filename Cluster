@@ -1,0 +1,225 @@
+# Warranty Model Family Clustering Notebook (single-cell version)
+# ---------------------------------------------------------------
+# This notebook builds per-model 60-month warranty age curves (cost-per-vehicle),
+# engineers shape features, performs PCA + clustering (KMeans with silhouette selection),
+# visualizes cluster mean curves, and exports artifacts:
+# - model_id -> cluster_id mapping
+# - cluster mean curves in age space
+# - PCA-transformed features and scaler/PCA objects (if needed for prod)
+#
+# Input contract:
+#   df columns:
+#     - model_id (str or categorical)
+#     - warranty_age_month (int in [1..60])
+#     - total_cost (float)
+#     - vehicles_in_service (float)
+#
+# After execution, key outputs:
+#   - clusters_df: DataFrame with model_id and cluster_id
+#   - cluster_mean_curves: DataFrame (rows=cluster_id, cols=age_1..age_60) of standardized mean curves
+#   - df_with_clusters: Original df merged with cluster_id (for modeling)
+#
+# Notes:
+# - Adjust smoothing window or summary features as needed.
+# - If peaks shift across models substantially, consider DTW + hierarchical clustering.
+
+
+# --------------- Imports and setup ---------------
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+import seaborn as sns
+
+from sklearn.preprocessing import StandardScaler
+from sklearn.decomposition import PCA
+from sklearn.cluster import KMeans
+from sklearn.metrics import silhouette_score, pairwise_distances
+
+# Display options
+pd.set_option('display.max_columns', 200)
+pd.set_option('display.width', 160)
+
+# Random seed for reproducibility
+RANDOM_STATE = 42
+np.random.seed(RANDOM_STATE)
+
+# --------------- Validate input ---------------
+# Expect 'df' to be present in the environment. Replace this section with a loader if needed:
+# df = pd.read_csv('warranty_age_costs.csv')
+required_cols = {'model_id','warranty_age_month','total_cost','vehicles_in_service'}
+assert required_cols.issubset(globals().get('df', pd.DataFrame()).columns), \
+    f"Input df must have columns: {required_cols}"
+
+# --------------- Build CPV and 60-length curves ---------------
+# Normalize by exposure so clustering focuses on failure/cost shape rather than pure volume
+agg = (df.groupby(['model_id','warranty_age_month'])
+         .agg(cost=('total_cost','sum'),
+              exposure=('vehicles_in_service','sum'))
+         .reset_index())
+agg['cpv'] = agg['cost'] / agg['exposure'].replace(0, np.nan)
+
+# Pivot: rows=model_id, cols=age month 1..60
+curves = (agg.pivot(index='model_id', columns='warranty_age_month', values='cpv')
+             .reindex(columns=range(1, 61)))
+
+# --------------- Gap filling and smoothing ---------------
+# Fill missing months using forward/backward fill per model
+curves_filled = curves.apply(lambda r: r.ffill().bfill(), axis=1)
+
+# Light smoothing with centered rolling mean to reduce noise yet keep shape
+curves_smooth = curves_filled.rolling(window=3, axis=1, min_periods=1, center=True).mean()
+
+# --------------- Standardize per model to focus on shape ---------------
+mu = curves_smooth.mean(axis=1)
+sd = curves_smooth.std(axis=1).replace(0, np.nan)
+curves_shape = (curves_smooth.sub(mu, axis=0)).div(sd, axis=0).fillna(0.0)
+curves_shape.columns = [f'age_{m}' for m in range(1, 61)]
+
+# --------------- Summary features (level and shape cues) ---------------
+peak_val = curves_smooth.max(axis=1)
+peak_mth = curves_smooth.idxmax(axis=1)
+band1 = curves_smooth.loc[:, 1:6].mean(axis=1)    # early failures
+band2 = curves_smooth.loc[:, 7:24].mean(axis=1)   # mid-life
+band3 = curves_smooth.loc[:, 25:60].mean(axis=1)  # late tail
+
+def tail_slope_fn(r):
+    xs = np.arange(45, 61)
+    ys = r.loc[45:60].values
+    if np.all(np.isnan(ys)):
+        return np.nan
+    ok = ~np.isnan(ys)
+    if ok.sum() < 2:
+        return 0.0
+    return np.polyfit(xs[ok], ys[ok], 1)[0]
+
+tail_slope = curves_smooth.apply(tail_slope_fn, axis=1)
+
+summary = pd.DataFrame({
+    'peak_val': peak_val,
+    'peak_mth': peak_mth,
+    'band1': band1,
+    'band2': band2,
+    'band3': band3,
+    'tail_slope': tail_slope
+}).fillna(0.0)
+
+# --------------- Feature matrix: standardized curve + summary ---------------
+X = pd.concat([curves_shape, summary], axis=1)
+
+# --------------- Scale + PCA (denoise, reduce dimensions) ---------------
+scaler = StandardScaler()
+Xp = scaler.fit_transform(X)
+
+pca = PCA(n_components=15, random_state=RANDOM_STATE)
+Z = pca.fit_transform(Xp)
+
+print('PCA explained variance (first 10 comps):', np.round(pca.explained_variance_ratio_[:10], 4))
+
+# --------------- Choose K via silhouette on KMeans ---------------
+k_range = range(3, 13)
+best = None
+sil_scores = []
+
+for k in k_range:
+    km = KMeans(n_clusters=k, random_state=RANDOM_STATE, n_init='auto')
+    labels = km.fit_predict(Z)
+    score = silhouette_score(Z, labels)
+    sil_scores.append((k, score))
+    if (best is None) or (score > best[0]):
+        best = (score, k, km, labels)
+
+best_score, best_k, best_model, best_labels = best
+print(f'Best K by silhouette: {best_k} (score={best_score:.3f})')
+
+# --------------- Cluster assignment ---------------
+clusters = pd.Series(best_labels, index=X.index, name='cluster_id')
+clusters_df = clusters.reset_index().rename(columns={'index':'model_id'})
+print('Cluster sizes:\n', clusters.value_counts().sort_index())
+
+# --------------- Cluster mean curves (standardized age space) ---------------
+cluster_mean_curves = (curves_shape.assign(cluster_id=clusters)
+                                   .groupby('cluster_id')
+                                   .mean())
+cluster_mean_curves.columns = [f'age_{m}' for m in range(1, 61)]
+
+# --------------- Visualize cluster mean curves ---------------
+plt.figure(figsize=(10, 5))
+for cid, row in cluster_mean_curves.iterrows():
+    plt.plot(range(1, 61), row.values, label=f'Cluster {cid}', alpha=0.9)
+plt.title('Cluster mean standardized age curves')
+plt.xlabel('Warranty Age Month')
+plt.ylabel('Standardized CPV (z-score)')
+plt.legend(ncol=2, fontsize=8)
+plt.grid(True, alpha=0.3)
+plt.show()
+
+# --------------- Optional: inspect sample model curves per cluster ---------------
+def plot_sample_models_per_cluster(n_per_cluster=5):
+    plt.figure(figsize=(12, 6))
+    for cid in sorted(clusters.unique()):
+        members = clusters[clusters==cid].index
+        sample = members.to_series().sample(min(n_per_cluster, len(members)), random_state=RANDOM_STATE)
+        for mid in sample:
+            plt.plot(range(1,61), curves_shape.loc[mid].values, alpha=0.35)
+    plt.title('Sample standardized curves by cluster (overlaid)')
+    plt.xlabel('Warranty Age Month')
+    plt.ylabel('Standardized CPV')
+    plt.grid(True, alpha=0.3)
+    plt.show()
+
+# Uncomment to view:
+# plot_sample_models_per_cluster(n_per_cluster=5)
+
+# --------------- Attach cluster_id back to raw df for modeling ---------------
+df_with_clusters = df.merge(clusters_df, on='model_id', how='left')
+
+# --------------- Derive cluster baseline feature for modeling ---------------
+# Build a long-form table with cluster centroid value for each age month as a feature
+centroid_long = (cluster_mean_curves
+                 .reset_index()
+                 .melt(id_vars='cluster_id', var_name='age_col', value_name='cluster_centroid_std'))
+centroid_long['warranty_age_month'] = centroid_long['age_col'].str.replace('age_', '', regex=False).astype(int)
+centroid_long = centroid_long.drop(columns=['age_col'])
+
+# Join centroid value by (cluster_id, warranty_age_month)
+df_model_ready = df_with_clusters.merge(
+    centroid_long, on=['cluster_id','warranty_age_month'], how='left'
+)
+
+# --------------- Distance-to-centroid feature in PCA space ---------------
+# Compute each model's PCA-space vector (mean over rows of same model since Z is model-level)
+# Note: Z is aligned with X.index == model_id
+Z_df = pd.DataFrame(Z, index=X.index, columns=[f'pc{i+1}' for i in range(Z.shape[1])])
+
+# Centroids in PCA space
+# For KMeans, use best_model.cluster_centers_ directly; otherwise mean of members
+centroids_pca = pd.DataFrame(best_model.cluster_centers_,
+                             columns=Z_df.columns,
+                             index=sorted(clusters.unique()))
+
+# Distance of each model to its cluster centroid
+def dist_to_centroid(row):
+    cid = clusters.loc[row.name]
+    return np.linalg.norm(row.values - centroids_pca.loc[cid].values)
+
+dist_series = Z_df.apply(dist_to_centroid, axis=1)
+dist_df = dist_series.rename('dist_to_centroid_pca').reset_index().rename(columns={'index':'model_id'})
+
+# Attach to per-row data
+df_model_ready = df_model_ready.merge(dist_df, on='model_id', how='left')
+
+# --------------- Outputs ---------------
+print("\nArtifacts ready:")
+print("- clusters_df: model_id -> cluster_id")
+print("- cluster_mean_curves: standardized cluster mean curves (age_1..age_60)")
+print("- df_model_ready: training data with cluster_id, cluster_centroid_std (by age), and dist_to_centroid_pca")
+
+# Quick peek
+display(clusters_df.head())
+display(cluster_mean_curves.head())
+display(df_model_ready.head())
+
+# --------------- (Optional) Save artifacts ---------------
+# clusters_df.to_csv('model_clusters.csv', index=False)
+# cluster_mean_curves.to_csv('cluster_mean_curves.csv')
+# df_model_ready.to_parquet('df_with_cluster_features.parquet', index=False)
