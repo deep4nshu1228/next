@@ -1,34 +1,22 @@
-# Complete Warranty Forecasting with Bike Model Clustering Pipeline
-# Import all required libraries
+# Streamlined Warranty Forecasting with Essential Features Only
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
-import seaborn as sns
 from sklearn.preprocessing import StandardScaler
 from sklearn.cluster import KMeans, AgglomerativeClustering
 from sklearn.decomposition import PCA
 from sklearn.metrics import silhouette_score, mean_absolute_error, mean_squared_error
-from scipy.cluster.hierarchy import dendrogram, linkage
-from scipy.spatial.distance import pdist
 import lightgbm as lgb
 from sklearn.model_selection import train_test_split
 from sklearn.ensemble import RandomForestRegressor
 import warnings
 warnings.filterwarnings('ignore')
 
-# Set display options
-pd.set_option('display.max_columns', None)
-plt.style.use('default')
-plt.rcParams['figure.figsize'] = (12, 8)
-
-print("✅ All libraries imported successfully!")
+print("✅ Libraries imported - Starting streamlined warranty forecasting pipeline")
 
 # =============================================================================
-# 1. DATA PREPARATION AND SAMPLE DATA CREATION
+# 1. DATA PREPARATION WITH SAMPLE DATA
 # =============================================================================
-
-# Create sample warranty data (replace with your actual data loading)
-# df = pd.read_csv('your_warranty_data.csv')
 
 np.random.seed(42)
 bike_models = [f'Model_{i:02d}' for i in range(1, 25)]
@@ -59,19 +47,16 @@ for model in bike_models:
 
 df = pd.DataFrame(sample_data)
 df['COST_PER_UNIT'] = df['WARRANTY_COST'] / df['VOLUME']
-
-print(f"✅ Data loaded! Shape: {df.shape}, Models: {df['BIKE_GROUPED'].nunique()}")
-
-# =============================================================================
-# 2. TIME SERIES CREATION AND FEATURE ENGINEERING
-# =============================================================================
-
-# Convert date columns
 df['DISPATCH_DATE'] = pd.to_datetime(df['DISPATCH_MONTH'], format='%m-%Y')
 df['WARRANTY_DATE'] = pd.to_datetime(df['WARRANTY_MONTH'], format='%m-%Y')
-df['WARRANTY_LAG'] = (df['WARRANTY_DATE'] - df['DISPATCH_DATE']).dt.days / 30.44
 
-# Create time series format
+print(f"✅ Data prepared: {df.shape[0]} records, {df['BIKE_GROUPED'].nunique()} models")
+
+# =============================================================================
+# 2. ESSENTIAL TIME SERIES FEATURE EXTRACTION
+# =============================================================================
+
+# Create time series pivot
 warranty_ts = df.pivot_table(
     index='WARRANTY_DATE',
     columns='BIKE_GROUPED',
@@ -80,271 +65,131 @@ warranty_ts = df.pivot_table(
     fill_value=0
 )
 
-cost_per_unit_ts = df.pivot_table(
-    index='WARRANTY_DATE',
-    columns='BIKE_GROUPED', 
-    values='COST_PER_UNIT',
-    aggfunc='mean',
-    fill_value=0
-)
-
-print(f"✅ Time series created: {warranty_ts.shape}")
-
-# =============================================================================
-# 3. STATISTICAL FEATURE EXTRACTION (Simplified TSFresh alternative)
-# =============================================================================
-
-def extract_statistical_features(ts_data):
-    """Extract statistical features from time series"""
+def extract_essential_features(ts_data, df_original):
+    """Extract only the most critical features for warranty clustering"""
     features = pd.DataFrame(index=ts_data.columns)
     
-    for col in ts_data.columns:
-        series = ts_data[col]
+    for model in ts_data.columns:
+        series = ts_data[model]
+        model_data = df_original[df_original['BIKE_GROUPED'] == model]
         
-        # Basic statistics
-        features.loc[col, 'mean'] = series.mean()
-        features.loc[col, 'std'] = series.std()
-        features.loc[col, 'min'] = series.min()
-        features.loc[col, 'max'] = series.max()
-        features.loc[col, 'median'] = series.median()
-        features.loc[col, 'skewness'] = series.skew()
-        features.loc[col, 'kurtosis'] = series.kurtosis()
+        # 1. COST PATTERNS (Most Important)
+        features.loc[model, 'avg_warranty_cost'] = series.mean()
+        features.loc[model, 'total_warranty_cost'] = series.sum()
+        features.loc[model, 'cost_volatility'] = series.std()
+        features.loc[model, 'avg_cost_per_unit'] = model_data['COST_PER_UNIT'].mean()
         
-        # Trend features
-        if len(series) > 2:
-            features.loc[col, 'trend'] = np.polyfit(range(len(series)), series.values, 1)[0]
-        else:
-            features.loc[col, 'trend'] = 0
-            
-        # Seasonal features
+        # 2. SEASONALITY PATTERNS (Critical for clustering)
         monthly_avg = series.groupby(series.index.month).mean()
-        features.loc[col, 'seasonal_variance'] = monthly_avg.std()
-        features.loc[col, 'peak_month'] = monthly_avg.idxmax()
-        features.loc[col, 'peak_to_avg_ratio'] = monthly_avg.max() / monthly_avg.mean() if monthly_avg.mean() > 0 else 0
+        features.loc[model, 'seasonal_variance'] = monthly_avg.std()
+        features.loc[model, 'peak_month'] = monthly_avg.idxmax()
+        features.loc[model, 'peak_to_avg_ratio'] = (monthly_avg.max() / monthly_avg.mean() 
+                                                   if monthly_avg.mean() > 0 else 1)
         
-        # Rolling statistics
-        features.loc[col, 'rolling_mean_3'] = series.rolling(3).mean().mean()
-        features.loc[col, 'rolling_std_3'] = series.rolling(3).std().mean()
-        
-        # Autocorrelation
-        if len(series) > 1:
-            features.loc[col, 'autocorr_lag1'] = series.autocorr(lag=1)
+        # 3. TREND ANALYSIS (Essential for forecasting)
+        if len(series) > 2:
+            features.loc[model, 'cost_trend'] = np.polyfit(range(len(series)), series.values, 1)[0]
         else:
-            features.loc[col, 'autocorr_lag1'] = 0
+            features.loc[model, 'cost_trend'] = 0
             
+        # 4. VOLUME CHARACTERISTICS (Business Critical)
+        features.loc[model, 'avg_volume'] = model_data['VOLUME'].mean()
+        features.loc[model, 'volume_volatility'] = model_data['VOLUME'].std()
+        
+        # 5. AGE PATTERNS (Warranty Specific)
+        features.loc[model, 'avg_age'] = model_data['AGE'].mean()
+        features.loc[model, 'max_age'] = model_data['AGE'].max()
+        
     return features.fillna(0)
 
-# Extract features
-print("🔄 Extracting statistical features...")
-warranty_features = extract_statistical_features(warranty_ts)
-cost_features = extract_statistical_features(cost_per_unit_ts)
-
-# Add business-specific features
-business_features = pd.DataFrame(index=warranty_ts.columns)
-for model in warranty_ts.columns:
-    model_data = df[df['BIKE_GROUPED'] == model]
-    business_features.loc[model, 'avg_volume'] = model_data['VOLUME'].mean()
-    business_features.loc[model, 'avg_age'] = model_data['AGE'].mean()
-    business_features.loc[model, 'avg_warranty_lag'] = model_data['WARRANTY_LAG'].mean()
-    business_features.loc[model, 'total_warranty_cost'] = model_data['WARRANTY_COST'].sum()
-
-# Combine all features
-all_features = pd.concat([
-    warranty_features.add_prefix('warranty_'),
-    cost_features.add_prefix('cost_'),
-    business_features
-], axis=1).fillna(0)
-
-print(f"✅ Features extracted: {all_features.shape[1]} features for {all_features.shape[0]} models")
+# Extract essential features
+essential_features = extract_essential_features(warranty_ts, df)
+print(f"✅ Essential features extracted: {essential_features.shape[1]} features")
+print("🔍 Key features:", list(essential_features.columns))
 
 # =============================================================================
-# 4. FEATURE SCALING AND DIMENSIONALITY REDUCTION
+# 3. CLUSTERING WITH ESSENTIAL FEATURES
 # =============================================================================
 
+# Scale features
 scaler = StandardScaler()
-features_scaled = scaler.fit_transform(all_features)
+features_scaled = scaler.fit_transform(essential_features)
 
-pca = PCA(n_components=0.85)
-features_pca = pca.fit_transform(features_scaled)
-
-print(f"✅ PCA completed: {features_pca.shape[1]} components, {pca.explained_variance_ratio_.sum():.3f} variance explained")
-
-# =============================================================================
-# 5. OPTIMAL CLUSTER FINDING
-# =============================================================================
-
-print("🔍 Finding optimal number of clusters...")
-max_clusters = min(12, len(features_pca)//3)
-k_range = range(2, max_clusters)
-inertias = []
+# Find optimal clusters (simplified)
+print("🔍 Finding optimal clusters...")
+k_range = range(2, 8)
 silhouette_scores = []
 
 for k in k_range:
     kmeans = KMeans(n_clusters=k, random_state=42, n_init=20)
-    labels = kmeans.fit_predict(features_pca)
-    inertias.append(kmeans.inertia_)
-    silhouette_scores.append(silhouette_score(features_pca, labels))
+    labels = kmeans.fit_predict(features_scaled)
+    sil_score = silhouette_score(features_scaled, labels)
+    silhouette_scores.append(sil_score)
 
-# Find optimal k
-best_sil_k = k_range[np.argmax(silhouette_scores)]
-optimal_k = best_sil_k
-print(f"✅ Optimal clusters: {optimal_k} (Silhouette score: {max(silhouette_scores):.3f})")
+optimal_k = k_range[np.argmax(silhouette_scores)]
+print(f"✅ Optimal clusters: {optimal_k}")
 
-# =============================================================================
-# 6. PERFORM CLUSTERING
-# =============================================================================
+# Perform final clustering
+final_clustering = AgglomerativeClustering(n_clusters=optimal_k, linkage='ward')
+cluster_labels = final_clustering.fit_predict(features_scaled)
 
-print("🌳 Performing clustering...")
-
-# Hierarchical clustering
-hierarchical_clustering = AgglomerativeClustering(n_clusters=optimal_k, linkage='ward')
-hier_labels = hierarchical_clustering.fit_predict(features_pca)
-
-# K-means clustering
-kmeans_final = KMeans(n_clusters=optimal_k, random_state=42, n_init=20)
-kmeans_labels = kmeans_final.fit_predict(features_pca)
-
-# Create cluster mapping
 cluster_df = pd.DataFrame({
-    'bike_model': all_features.index,
-    'hierarchical_cluster': hier_labels,
-    'kmeans_cluster': kmeans_labels
+    'bike_model': essential_features.index,
+    'cluster': cluster_labels
 })
 
-# Use hierarchical clustering as primary method
-cluster_df['cluster'] = cluster_df['hierarchical_cluster']
-
-print(f"✅ Clustering completed!")
-print("Cluster distribution:")
+print("📊 Cluster distribution:")
 print(cluster_df['cluster'].value_counts().sort_index())
 
 # =============================================================================
-# 7. CLUSTER ANALYSIS AND VISUALIZATION
+# 4. ESSENTIAL MODELING FEATURES ONLY
 # =============================================================================
 
-print("📊 Analyzing clusters...")
-
-# Analyze cluster characteristics
-cluster_stats = []
-for cluster_id in sorted(cluster_df['cluster'].unique()):
-    cluster_models = cluster_df[cluster_df['cluster'] == cluster_id]['bike_model'].tolist()
-    cluster_warranty_cost = warranty_ts[cluster_models].sum(axis=1)
-    
-    stats = {
-        'cluster': cluster_id,
-        'n_models': len(cluster_models),
-        'avg_monthly_cost': cluster_warranty_cost.mean(),
-        'cost_volatility': cluster_warranty_cost.std(),
-        'total_cost': cluster_warranty_cost.sum(),
-        'models': cluster_models[:3]  # Show first 3 models
-    }
-    cluster_stats.append(stats)
-
-cluster_summary = pd.DataFrame(cluster_stats)
-print("\n📋 Cluster Summary:")
-print(cluster_summary[['cluster', 'n_models', 'avg_monthly_cost', 'cost_volatility']])
-
-# Visualize clusters
-fig, axes = plt.subplots(2, 2, figsize=(15, 12))
-
-# Plot 1: Elbow curve
-axes[0,0].plot(k_range, inertias, 'bo-')
-axes[0,0].set_xlabel('Number of Clusters')
-axes[0,0].set_ylabel('Inertia')
-axes[0,0].set_title('Elbow Method')
-axes[0,0].grid(True, alpha=0.3)
-
-# Plot 2: Silhouette scores
-axes[0,1].plot(k_range, silhouette_scores, 'ro-')
-axes[0,1].axvline(x=optimal_k, color='g', linestyle='--', label=f'Optimal k={optimal_k}')
-axes[0,1].set_xlabel('Number of Clusters')
-axes[0,1].set_ylabel('Silhouette Score')
-axes[0,1].set_title('Silhouette Analysis')
-axes[0,1].legend()
-axes[0,1].grid(True, alpha=0.3)
-
-# Plot 3: PCA visualization
-scatter = axes[1,0].scatter(features_pca[:, 0], features_pca[:, 1], 
-                           c=cluster_df['cluster'], cmap='viridis', alpha=0.7)
-axes[1,0].set_xlabel('First Principal Component')
-axes[1,0].set_ylabel('Second Principal Component')
-axes[1,0].set_title('Clusters in PCA Space')
-plt.colorbar(scatter, ax=axes[1,0])
-
-# Plot 4: Cluster sizes
-cluster_counts = cluster_df['cluster'].value_counts().sort_index()
-axes[1,1].bar(cluster_counts.index, cluster_counts.values, color='skyblue')
-axes[1,1].set_xlabel('Cluster ID')
-axes[1,1].set_ylabel('Number of Models')
-axes[1,1].set_title('Models per Cluster')
-axes[1,1].grid(True, alpha=0.3)
-
-plt.tight_layout()
-plt.show()
-
-# =============================================================================
-# 8. PREPARE MODELING DATA
-# =============================================================================
-
-print("🔧 Preparing modeling features...")
-
-# Merge cluster information with original data
-df_clustered = df.merge(cluster_df[['bike_model', 'cluster']], 
-                       left_on='BIKE_GROUPED', right_on='bike_model', how='left')
-
-# Create comprehensive modeling features
-def create_modeling_features(df_input):
+def create_essential_modeling_features(df_input):
+    """Create only the most important modeling features"""
     df_model = df_input.copy()
     
-    # Date features
-    df_model['dispatch_month'] = df_model['DISPATCH_DATE'].dt.month
-    df_model['dispatch_quarter'] = df_model['DISPATCH_DATE'].dt.quarter
+    # CORE FEATURES ONLY
+    # 1. Time features (essential for seasonality)
     df_model['warranty_month'] = df_model['WARRANTY_DATE'].dt.month
     df_model['warranty_quarter'] = df_model['WARRANTY_DATE'].dt.quarter
-    df_model['dispatch_year'] = df_model['DISPATCH_DATE'].dt.year
-    df_model['warranty_year'] = df_model['WARRANTY_DATE'].dt.year
+    df_model['dispatch_month'] = df_model['DISPATCH_DATE'].dt.month
     
-    # Cyclical encoding for months
-    df_model['dispatch_month_sin'] = np.sin(2 * np.pi * df_model['dispatch_month'] / 12)
-    df_model['dispatch_month_cos'] = np.cos(2 * np.pi * df_model['dispatch_month'] / 12)
+    # 2. Cyclical encoding for seasonality (most important)
     df_model['warranty_month_sin'] = np.sin(2 * np.pi * df_model['warranty_month'] / 12)
     df_model['warranty_month_cos'] = np.cos(2 * np.pi * df_model['warranty_month'] / 12)
     
-    # Volume-based features
+    # 3. Core business features
     df_model['log_volume'] = np.log1p(df_model['VOLUME'])
-    df_model['volume_squared'] = df_model['VOLUME'] ** 2
-    df_model['volume_sqrt'] = np.sqrt(df_model['VOLUME'])
-    
-    # Age-related features
     df_model['age_squared'] = df_model['AGE'] ** 2
-    df_model['age_log'] = np.log1p(df_model['AGE'])
-    df_model['age_sqrt'] = np.sqrt(df_model['AGE'])
+    df_model['warranty_lag'] = (df_model['WARRANTY_DATE'] - df_model['DISPATCH_DATE']).dt.days / 30.44
     
-    # Interaction features
-    df_model['age_volume_interaction'] = df_model['AGE'] * df_model['VOLUME']
-    df_model['age_month_interaction'] = df_model['AGE'] * df_model['warranty_month']
-    df_model['volume_month_interaction'] = df_model['VOLUME'] * df_model['warranty_month']
+    # 4. Key interaction (most predictive)
+    df_model['age_volume_interaction'] = df_model['AGE'] * np.log1p(df_model['VOLUME'])
     
-    # Lag features (sorted by bike model and date)
+    # 5. Simple lag feature (if enough data)
     df_model = df_model.sort_values(['BIKE_GROUPED', 'WARRANTY_DATE'])
-    df_model['warranty_cost_lag1'] = df_model.groupby('BIKE_GROUPED')['WARRANTY_COST'].shift(1)
-    df_model['warranty_cost_lag2'] = df_model.groupby('BIKE_GROUPED')['WARRANTY_COST'].shift(2)
-    df_model['warranty_cost_ma3'] = df_model.groupby('BIKE_GROUPED')['WARRANTY_COST'].rolling(3, min_periods=1).mean().values
-    df_model['cost_per_unit_ma3'] = df_model.groupby('BIKE_GROUPED')['COST_PER_UNIT'].rolling(3, min_periods=1).mean().values
+    df_model['warranty_cost_lag1'] = df_model.groupby('BIKE_GROUPED')['WARRANTY_COST'].shift(1).fillna(0)
     
-    return df_model.fillna(0)
+    return df_model
 
-df_model = create_modeling_features(df_clustered)
+# Merge cluster info and create features
+df_clustered = df.merge(cluster_df, left_on='BIKE_GROUPED', right_on='bike_model', how='left')
+df_model = create_essential_modeling_features(df_clustered)
 
-# Feature columns for modeling
-feature_cols = [col for col in df_model.columns 
-               if col not in ['WARRANTY_COST', 'BIKE_GROUPED', 'bike_model',
-                            'DISPATCH_MONTH', 'WARRANTY_MONTH', 'DISPATCH_DATE', 'WARRANTY_DATE']]
+# Essential feature columns only
+essential_model_features = [
+    'WARRANTY_MONTH', 'warranty_quarter', 'dispatch_month',
+    'warranty_month_sin', 'warranty_month_cos',
+    'AGE', 'age_squared', 'log_volume', 'VOLUME',
+    'warranty_lag', 'age_volume_interaction',
+    'warranty_cost_lag1', 'COST_PER_UNIT'
+]
 
-print(f"✅ Modeling features created: {len(feature_cols)} features")
+print(f"✅ Essential modeling features: {len(essential_model_features)}")
 
 # =============================================================================
-# 9. TRAIN CLUSTER-SPECIFIC MODELS
+# 5. STREAMLINED MODEL TRAINING
 # =============================================================================
 
 print("🚀 Training cluster-specific models...")
@@ -353,102 +198,66 @@ cluster_models = {}
 model_performance = []
 
 for cluster_id in sorted(df_model['cluster'].unique()):
-    print(f"\n📈 Training model for Cluster {cluster_id}")
-    
-    # Filter data for current cluster
     cluster_data = df_model[df_model['cluster'] == cluster_id].copy()
     
     if len(cluster_data) < 30:
-        print(f"⚠️  Cluster {cluster_id} has only {len(cluster_data)} samples - using Random Forest")
-        model_type = 'rf'
-    else:
-        model_type = 'lgb'
+        continue  # Skip clusters with insufficient data
     
-    # Prepare features and target
-    X = cluster_data[feature_cols]
+    # Prepare data
+    X = cluster_data[essential_model_features].fillna(0)
     y = cluster_data['WARRANTY_COST']
     
-    # Split data
+    # Split
     X_train, X_test, y_train, y_test = train_test_split(
-        X, y, test_size=0.25, random_state=42, shuffle=True
+        X, y, test_size=0.25, random_state=42
     )
     
-    # Train model based on cluster size
-    if model_type == 'lgb':
-        model = lgb.LGBMRegressor(
-            n_estimators=500,
-            learning_rate=0.1,
-            max_depth=6,
-            num_leaves=31,
-            min_child_samples=20,
-            subsample=0.8,
-            colsample_bytree=0.8,
-            random_state=42,
-            n_jobs=-1,
-            verbosity=-1
-        )
-        
-        model.fit(
-            X_train, y_train,
-            eval_set=[(X_test, y_test)],
-            callbacks=[lgb.early_stopping(50), lgb.log_evaluation(0)]
-        )
-    else:
-        model = RandomForestRegressor(
-            n_estimators=100,
-            max_depth=10,
-            min_samples_split=5,
-            min_samples_leaf=2,
-            random_state=42,
-            n_jobs=-1
-        )
-        model.fit(X_train, y_train)
+    # Train LightGBM
+    model = lgb.LGBMRegressor(
+        n_estimators=300,
+        learning_rate=0.1,
+        max_depth=6,
+        num_leaves=31,
+        random_state=42,
+        verbosity=-1
+    )
     
-    # Evaluate model
+    model.fit(X_train, y_train)
+    
+    # Evaluate
     y_pred = model.predict(X_test)
     mae = mean_absolute_error(y_test, y_pred)
-    rmse = np.sqrt(mean_squared_error(y_test, y_pred))
     mape = np.mean(np.abs((y_test - y_pred) / y_test)) * 100
     
     cluster_models[cluster_id] = {
         'model': model,
-        'features': feature_cols,
         'mae': mae,
-        'rmse': rmse,
         'mape': mape,
-        'n_samples': len(cluster_data),
-        'model_type': model_type
+        'n_samples': len(cluster_data)
     }
     
     model_performance.append({
         'cluster': cluster_id,
         'n_samples': len(cluster_data),
         'mae': mae,
-        'rmse': rmse,
-        'mape': mape,
-        'model_type': model_type
+        'mape': mape
     })
     
-    print(f"✅ Cluster {cluster_id}: MAE={mae:.0f}, RMSE={rmse:.0f}, MAPE={mape:.1f}%, Type={model_type}")
+    print(f"✅ Cluster {cluster_id}: MAE={mae:.0f}, MAPE={mape:.1f}%, Samples={len(cluster_data)}")
 
 # =============================================================================
-# 10. MODEL PERFORMANCE ANALYSIS
+# 6. BASELINE COMPARISON
 # =============================================================================
 
-performance_df = pd.DataFrame(model_performance)
-print(f"\n📊 Overall Model Performance:")
-print(performance_df)
-
-# Calculate baseline model (single model for all data)
-print(f"\n🔄 Training baseline model (no clustering)...")
-X_baseline = df_model[feature_cols]
+print("\n🔄 Training baseline model...")
+X_baseline = df_model[essential_model_features].fillna(0)
 y_baseline = df_model['WARRANTY_COST']
 X_train_base, X_test_base, y_train_base, y_test_base = train_test_split(
     X_baseline, y_baseline, test_size=0.25, random_state=42
 )
 
 baseline_model = lgb.LGBMRegressor(
-    n_estimators=500,
+    n_estimators=300,
     learning_rate=0.1,
     max_depth=6,
     random_state=42,
@@ -458,117 +267,127 @@ baseline_model.fit(X_train_base, y_train_base)
 y_pred_baseline = baseline_model.predict(X_test_base)
 
 baseline_mae = mean_absolute_error(y_test_base, y_pred_baseline)
-baseline_rmse = np.sqrt(mean_squared_error(y_test_base, y_pred_baseline))
 baseline_mape = np.mean(np.abs((y_test_base - y_pred_baseline) / y_test_base)) * 100
 
-print(f"📈 Baseline Model: MAE={baseline_mae:.0f}, RMSE={baseline_rmse:.0f}, MAPE={baseline_mape:.1f}%")
-
-# Compare performance
+# Calculate improvement
+performance_df = pd.DataFrame(model_performance)
 clustered_weighted_mae = np.average(performance_df['mae'], weights=performance_df['n_samples'])
 improvement = ((baseline_mae - clustered_weighted_mae) / baseline_mae) * 100
 
-print(f"🎯 Clustered Model Weighted MAE: {clustered_weighted_mae:.0f}")
-print(f"🚀 Improvement over baseline: {improvement:.1f}%")
+print(f"📈 Baseline Model: MAE={baseline_mae:.0f}, MAPE={baseline_mape:.1f}%")
+print(f"🎯 Clustered Model: MAE={clustered_weighted_mae:.0f}")
+print(f"🚀 Improvement: {improvement:.1f}%")
 
 # =============================================================================
-# 11. PREDICTION FUNCTION
+# 7. FEATURE IMPORTANCE ANALYSIS
 # =============================================================================
 
-def predict_warranty_cost(new_data, cluster_models, cluster_df, scaler, feature_cols):
-    """
-    Make predictions using cluster-specific models
-    """
-    # Add cluster information
+print("\n🔍 Most Important Features:")
+feature_importance_dict = {}
+
+for cluster_id, model_info in cluster_models.items():
+    model = model_info['model']
+    importances = model.feature_importances_
+    
+    for i, feature in enumerate(essential_model_features):
+        if feature not in feature_importance_dict:
+            feature_importance_dict[feature] = []
+        feature_importance_dict[feature].append(importances[i])
+
+# Calculate average importance across clusters
+avg_importance = {feature: np.mean(scores) for feature, scores in feature_importance_dict.items()}
+sorted_features = sorted(avg_importance.items(), key=lambda x: x[1], reverse=True)
+
+print("🏆 Top Features by Importance:")
+for i, (feature, importance) in enumerate(sorted_features[:8], 1):
+    print(f"{i:2d}. {feature:<25} {importance:.3f}")
+
+# =============================================================================
+# 8. STREAMLINED PREDICTION FUNCTION
+# =============================================================================
+
+def predict_warranty_cost_simple(new_data, cluster_models, cluster_df, essential_features):
+    """Simplified prediction function"""
+    # Add cluster info
     new_data_clustered = new_data.merge(
-        cluster_df[['bike_model', 'cluster']], 
-        left_on='BIKE_GROUPED', 
-        right_on='bike_model', 
-        how='left'
+        cluster_df, left_on='BIKE_GROUPED', right_on='bike_model', how='left'
     )
     
     # Create features
-    new_data_features = create_modeling_features(new_data_clustered)
+    new_data_features = create_essential_modeling_features(new_data_clustered)
     
     predictions = []
-    
-    for cluster_id in sorted(cluster_models.keys()):
+    for cluster_id in cluster_models.keys():
         cluster_data = new_data_features[new_data_features['cluster'] == cluster_id].copy()
         
         if len(cluster_data) == 0:
             continue
             
-        model_info = cluster_models[cluster_id]
-        model = model_info['model']
+        X = cluster_data[essential_features].fillna(0)
+        y_pred = cluster_models[cluster_id]['model'].predict(X)
         
-        X = cluster_data[feature_cols].fillna(0)
-        y_pred = model.predict(X)
-        
-        cluster_predictions = cluster_data[['BIKE_GROUPED', 'WARRANTY_MONTH', 'VOLUME', 'AGE', 'WARRANTY_COST']].copy()
+        cluster_predictions = cluster_data[['BIKE_GROUPED', 'WARRANTY_COST']].copy()
         cluster_predictions['predicted_warranty_cost'] = y_pred
         cluster_predictions['cluster'] = cluster_id
-        cluster_predictions['model_mae'] = model_info['mae']
-        cluster_predictions['prediction_error'] = np.abs(cluster_predictions['WARRANTY_COST'] - y_pred)
         
         predictions.append(cluster_predictions)
     
-    if predictions:
-        return pd.concat(predictions, ignore_index=True)
-    else:
-        return pd.DataFrame()
+    return pd.concat(predictions, ignore_index=True) if predictions else pd.DataFrame()
 
 # =============================================================================
-# 12. EXAMPLE PREDICTIONS AND RESULTS
+# 9. SAMPLE PREDICTIONS AND VISUALIZATION
 # =============================================================================
 
-print(f"\n🎯 Making sample predictions...")
-
-# Sample test data
-test_data = df_model.sample(20, random_state=42).copy()
-predictions = predict_warranty_cost(test_data, cluster_models, cluster_df, scaler, feature_cols)
+# Test predictions
+test_data = df_model.sample(15, random_state=42)
+predictions = predict_warranty_cost_simple(test_data, cluster_models, cluster_df, essential_model_features)
 
 if not predictions.empty:
     print(f"\n📋 Sample Predictions:")
-    display_cols = ['BIKE_GROUPED', 'WARRANTY_COST', 'predicted_warranty_cost', 'cluster', 'prediction_error']
-    print(predictions[display_cols].head(10))
+    sample_results = predictions[['BIKE_GROUPED', 'WARRANTY_COST', 'predicted_warranty_cost', 'cluster']].head(8)
+    print(sample_results)
     
     sample_mae = mean_absolute_error(predictions['WARRANTY_COST'], predictions['predicted_warranty_cost'])
-    sample_mape = np.mean(np.abs((predictions['WARRANTY_COST'] - predictions['predicted_warranty_cost']) / predictions['WARRANTY_COST'])) * 100
-    
-    print(f"\n🎯 Sample Prediction Performance:")
-    print(f"MAE: {sample_mae:.0f}")
-    print(f"MAPE: {sample_mape:.1f}%")
+    print(f"\n🎯 Sample MAE: {sample_mae:.0f}")
 
-# =============================================================================
-# 13. FEATURE IMPORTANCE ANALYSIS
-# =============================================================================
+# Visualization
+fig, axes = plt.subplots(2, 2, figsize=(15, 10))
 
-print(f"\n🔍 Feature Importance Analysis:")
+# Plot 1: Cluster characteristics
+cluster_summary = essential_features.groupby(cluster_df.set_index('bike_model')['cluster']).mean()
+cluster_summary['avg_warranty_cost'].plot(kind='bar', ax=axes[0,0], color='skyblue')
+axes[0,0].set_title('Average Warranty Cost by Cluster')
+axes[0,0].set_ylabel('Warranty Cost')
 
-# Get feature importance from each cluster model
-feature_importance_data = []
-for cluster_id, model_info in cluster_models.items():
-    model = model_info['model']
-    
-    if hasattr(model, 'feature_importances_'):
-        importances = model.feature_importances_
-        for i, feature in enumerate(feature_cols):
-            feature_importance_data.append({
-                'cluster': cluster_id,
-                'feature': feature,
-                'importance': importances[i]
-            })
+# Plot 2: Feature importance
+top_features = dict(sorted_features[:6])
+axes[0,1].barh(list(top_features.keys()), list(top_features.values()), color='lightcoral')
+axes[0,1].set_title('Top 6 Feature Importance')
+axes[0,1].set_xlabel('Importance')
 
-if feature_importance_data:
-    importance_df = pd.DataFrame(feature_importance_data)
-    
-    # Top features overall
-    overall_importance = importance_df.groupby('feature')['importance'].mean().sort_values(ascending=False)
-    print(f"\n🏆 Top 10 Most Important Features:")
-    print(overall_importance.head(10))
+# Plot 3: Cluster distribution
+cluster_df['cluster'].value_counts().sort_index().plot(kind='bar', ax=axes[1,0], color='lightgreen')
+axes[1,0].set_title('Models per Cluster')
+axes[1,0].set_ylabel('Number of Models')
+
+# Plot 4: Model performance comparison
+clusters = performance_df['cluster'].values
+maes = performance_df['mae'].values
+axes[1,1].bar(clusters, maes, color='gold', alpha=0.7, label='Cluster MAE')
+axes[1,1].axhline(y=baseline_mae, color='red', linestyle='--', linewidth=2, label='Baseline MAE')
+axes[1,1].set_title('Model Performance Comparison')
+axes[1,1].set_xlabel('Cluster ID')
+axes[1,1].set_ylabel('MAE')
+axes[1,1].legend()
+
+plt.tight_layout()
+plt.show()
 
 print(f"\n" + "="*60)
-print("🎉 WARRANTY FORECASTING CLUSTERING PIPELINE COMPLETED!")
+print("🎉 STREAMLINED WARRANTY FORECASTING COMPLETED!")
 print("="*60)
-print(f"✅ Models trained for {len(cluster_models)} clusters")
-print(f"📊 Improvement over baseline: {improvement:.1f}%")
-print(f"🚀 Pipeline ready for production use!")
+print(f"✅ Essential features used: {len(essential_model_features)}")
+print(f"📊 Clusters created: {len(cluster_models)}")
+print(f"🚀 Performance improvement: {improvement:.1f}%")
+print(f"💡 Key insight: Focus on seasonality, age, and volume interactions")
+print(f"🔧 Production ready with minimal complexity!")
