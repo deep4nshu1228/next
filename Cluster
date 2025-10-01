@@ -441,3 +441,52 @@ print("🎉 COMPLETE WARRANTY FORECASTING PIPELINE FINISHED!")
 print("="*60)
 print("✅ All functions included and working properly")
 print("🔧 Ready for production use!")
+
+
+
+
+# Simple Export: One Cluster = One Excel File
+def export_clusters_simple(df_original, cluster_df, output_folder='warranty_clusters'):
+    """
+    Simple export: Create one Excel file per cluster with original data
+    """
+    import os
+    
+    print("📁 Creating cluster Excel files...")
+    
+    # Create output folder if it doesn't exist
+    if not os.path.exists(output_folder):
+        os.makedirs(output_folder)
+    
+    # Merge original data with clusters
+    df_with_clusters = df_original.merge(
+        cluster_df, 
+        left_on='BIKE_GROUPED', 
+        right_on='bike_model', 
+        how='left'
+    )
+    
+    # Export one file per cluster
+    for cluster_id in sorted(df_with_clusters['cluster'].unique()):
+        if pd.isna(cluster_id):
+            continue
+            
+        # Get data for this cluster
+        cluster_data = df_with_clusters[df_with_clusters['cluster'] == cluster_id].copy()
+        
+        # Remove the extra bike_model column
+        cluster_data = cluster_data.drop('bike_model', axis=1)
+        
+        # Create filename
+        filename = f"{output_folder}/Cluster_{cluster_id}_Data.xlsx"
+        
+        # Export to Excel
+        cluster_data.to_excel(filename, index=False)
+        
+        print(f"✅ Cluster {cluster_id}: {len(cluster_data)} records → {filename}")
+    
+    print(f"\n✅ Done! Check '{output_folder}' folder for Excel files")
+
+# Run the simple export
+export_clusters_simple(df, cluster_df)
+
