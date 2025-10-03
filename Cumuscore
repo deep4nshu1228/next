@@ -1,37 +1,47 @@
 import numpy as np
 
-# 1) Get model classes as produced by scikit-learn
-classes_model = list(clf.classes_)  # predict_proba columns are aligned to this [web:18]
+# Model’s native class order
+classes_native = list(clf.classes_)  # e.g., ['gt_30','within_3','no_conversion','within_8_15','within_4_7','within_16_30'] [web:20]
 
-# 2) Define the canonical order wanted
-order = ['within_3','within_4_7','within_8_15','within_16_30','gt_30','no_conversion']  # customize labels to match training [web:18]
+# Fast name -> column index map (no reordering of proba)
+col = {c:i for i,c in enumerate(classes_native)}  # {'gt_30':0, 'within_3':1, ...} [web:20]
 
-# 3) Build reindexer from current classes -> desired order
-#    This will raise KeyError if a required class is missing, which is useful to catch issues.
-col_idx = [classes_model.index(c) for c in order]  # positions of desired classes in current output [web:18]
+# Convenience getters by name (robust even if classes are shuffled)
+P = lambda name: proba[:, col[name]]  # vector of probs for class 'name' [web:20]
 
-# 4) Reorder proba columns
-proba_ord = proba[:, col_idx]  # columns now in canonical order [web:18]
+# Define canonical bucket names used in business logic
+B3      = 'within_3'
+B4_7    = 'within_4_7'
+B8_15   = 'within_8_15'
+B16_30  = 'within_16_30'
+BGT30   = 'gt_30'
+BNO     = 'no_conversion'  # keep existing label string [web:20]
 
-# 5) If y_pred_labels are strings from model.predict, remap to indices of canonical order
-y_pred_labels_ord = y_pred_labels  # ensure these strings exactly match 'order' entries [web:18]
-y_pred_idx = np.array([order.index(lbl) for lbl in y_pred_labels_ord])  # 0..5 [web:18]
+# Precompute cumulative-by-name without touching column order
+sum_all_time = P(B3) + P(B4_7) + P(B8_15) + P(B16_30) + P(BGT30)                          # within 3 rule [web:20]
+sum_4_on     = P(B4_7) + P(B8_15) + P(B16_30) + P(BGT30)                                   # within 4–7 rule [web:20]
+sum_8_on     = P(B8_15) + P(B16_30) + P(BGT30)                                             # within 8–15 rule [web:20]
+sum_16_on    = P(B16_30) + P(BGT30)                                                        # within 16–30 rule [web:20]
+sum_gt30     = P(BGT30)                                                                    # >30 rule [web:20]
+sum_not_no   = 1.0 - P(BNO)                                                                # no conversion rule [web:20]
 
-# 6) Cumulative “future” sums across time buckets (exclude 'no_conversion')
-time_only = proba_ord[:, :5]  # within_3..gt_30 [web:18]
-time_cum = np.cumsum(time_only[:, ::-1], axis=1)[:, ::-1]  # current + later buckets [web:18]
+# Map predicted label -> correct propensity vector (no reindexing or reorder)
+label_to_vec = {
+    B3:      sum_all_time,
+    B4_7:    sum_4_on,
+    B8_15:   sum_8_on,
+    B16_30:  sum_16_on,
+    BGT30:   sum_gt30,
+    BNO:     sum_not_no,
+}  # [web:20]
 
-# 7) Build propensity per row per rule
-n = proba_ord.shape[0]
-rows = np.arange(n)
-propensity = np.empty(n, dtype=float)
+# Vectorized gather by predicted labels
+labels = np.asarray(y_pred_labels)  # strings
+propensity = np.empty(proba.shape[0], dtype=float)
+for name, vec in label_to_vec.items():
+    mask = labels == name
+    propensity[mask] = vec[mask]  # assign per rule without altering proba column order [web:20]
 
-mask_time = y_pred_idx < 5
-propensity[mask_time] = time_cum[rows[mask_time], y_pred_idx[mask_time]]  # sums for time buckets [web:18]
-
-mask_no = ~mask_time  # idx == 5
-propensity[mask_no] = 1.0 - proba_ord[rows[mask_no], 5]  # 1 - P(no_conversion) [web:18]
-
-# 8) Attach to results
-res['PREDICTED_CONVERSION_TIME'] = y_pred_labels_ord  # unchanged labels, but consistent with order [web:18]
-res['PROPENSITY_SCORE'] = propensity  # final score [web:18]
+# Attach results
+res['PREDICTED_CONVERSION_TIME'] = labels  # unchanged
+res['PROPENSITY_SCORE'] = propensity       # final [web:20]
