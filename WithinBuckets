@@ -55,3 +55,120 @@ print("\nCluster means (propensity, time to purchase):\n", cluster_agg)
 
 # df now contains:
 # 'ESTIMATED_TIME_CONVERSION', 'PROPENSITY_QUINTILE', 'fast_conversion', 'CLUSTER'
+
+
+
+
+############################################################
+
+import pandas as pd
+import numpy as np
+from sklearn.metrics import roc_curve, classification_report, confusion_matrix
+
+# ============================================================================
+# PHASE 1: TRAINING - Fit Model & Determine Thresholds (Training Data Only)
+# ============================================================================
+
+# Step 1: Train propensity model on training data
+# Assuming you have X_train, y_train, X_test, y_test ready
+# model.fit(X_train, y_train)
+
+# Step 2: Get propensity scores for training set
+train_propensity = model.predict_proba(X_train)[:, 1]
+train_df['LEAD_PROPENSITY_SCORE'] = train_propensity
+
+# Step 3: Filter for ACTUAL CONVERTED leads in training set only
+converted_train = train_df[train_df['converted'] == 1].copy()
+
+# Step 4: Create time buckets for converted training leads
+bins = [0, 3, 7, 15, 30, np.inf]
+labels = ['within_3_days', 'within_4_to_7_days', 'within_8_to_15_days', 
+          'within_16_to_30_days', 'more_than_30_days']
+converted_train['time_bucket'] = pd.cut(converted_train['TIME_TO_PURCHASE'], 
+                                         bins=bins, labels=labels, right=True)
+
+# Step 5: Analyze bucket statistics (for reference)
+bucket_stats = converted_train.groupby('time_bucket')['LEAD_PROPENSITY_SCORE'].agg(
+    ['mean', 'min', 'max', 'std', 'count']
+)
+print("Training Data - Bucket Statistics:\n", bucket_stats)
+
+# Step 6: Find optimal thresholds using ROC analysis on TRAINING data
+def find_optimal_threshold_for_bucket(df, max_days):
+    """Find optimal propensity threshold for conversion within max_days"""
+    df_temp = df.copy()
+    df_temp['is_fast'] = (df_temp['TIME_TO_PURCHASE'] <= max_days).astype(int)
+    fpr, tpr, thresholds = roc_curve(df_temp['is_fast'], df_temp['LEAD_PROPENSITY_SCORE'])
+    optimal_idx = np.argmax(tpr - fpr)
+    return thresholds[optimal_idx]
+
+# Calculate optimal thresholds for different time windows (TRAINING DATA ONLY)
+threshold_3_days = find_optimal_threshold_for_bucket(converted_train, 3)
+threshold_7_days = find_optimal_threshold_for_bucket(converted_train, 7)
+threshold_15_days = find_optimal_threshold_for_bucket(converted_train, 15)
+threshold_30_days = find_optimal_threshold_for_bucket(converted_train, 30)
+
+print(f"\nOptimal Thresholds (from Training Data):")
+print(f"  ≤3 days: {threshold_3_days:.4f}")
+print(f"  ≤7 days: {threshold_7_days:.4f}")
+print(f"  ≤15 days: {threshold_15_days:.4f}")
+print(f"  ≤30 days: {threshold_30_days:.4f}")
+
+# ============================================================================
+# PHASE 2: TEST - Apply Thresholds to Test Set (Evaluation Only)
+# ============================================================================
+
+# Step 7: Get propensity scores for test set
+test_propensity = model.predict_proba(X_test)[:, 1]
+test_df['LEAD_PROPENSITY_SCORE'] = test_propensity
+
+# Step 8: Apply the pre-determined thresholds (learned from training)
+def assign_estimated_conversion_time(propensity_score):
+    """Assign bucket based on training-derived thresholds"""
+    if propensity_score >= threshold_3_days:
+        return 'within_3_days'
+    elif propensity_score >= threshold_7_days:
+        return 'within_4_to_7_days'
+    elif propensity_score >= threshold_15_days:
+        return 'within_8_to_15_days'
+    elif propensity_score >= threshold_30_days:
+        return 'within_16_to_30_days'
+    else:
+        return 'more_than_30_days'
+
+test_df['ESTIMATED_TIME_CONVERSION'] = test_df['LEAD_PROPENSITY_SCORE'].apply(
+    assign_estimated_conversion_time
+)
+
+# Step 9: Evaluate performance on test set (converted leads only)
+test_converted = test_df[test_df['converted'] == 1].copy()
+test_converted['actual_bucket'] = pd.cut(test_converted['TIME_TO_PURCHASE'], 
+                                          bins=bins, labels=labels, right=True)
+
+# Display test set results
+print("\nTest Data - Predicted vs Actual Bucket Distribution:")
+comparison = pd.crosstab(test_converted['actual_bucket'], 
+                         test_converted['ESTIMATED_TIME_CONVERSION'], 
+                         margins=True)
+print(comparison)
+
+# Step 10: Classification metrics
+print("\nClassification Report:")
+print(classification_report(test_converted['actual_bucket'], 
+                           test_converted['ESTIMATED_TIME_CONVERSION'], 
+                           zero_division=0))
+
+print("\nConfusion Matrix:")
+print(confusion_matrix(test_converted['actual_bucket'], 
+                      test_converted['ESTIMATED_TIME_CONVERSION']))
+
+# ============================================================================
+# PHASE 3: PRODUCTION - Apply to New Leads
+# ============================================================================
+
+# For new unseen leads, just apply the function:
+# new_leads['LEAD_PROPENSITY_SCORE'] = model.predict_proba(new_leads_features)[:, 1]
+# new_leads['ESTIMATED_TIME_CONVERSION'] = new_leads['LEAD_PROPENSITY_SCORE'].apply(
+#     assign_estimated_conversion_time
+# )
+
