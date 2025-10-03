@@ -1,203 +1,121 @@
-# Jupyter-ready end-to-end pipeline
 import pandas as pd
 import numpy as np
-from datetime import timedelta
 
-# -----------------------------
-# CONFIGURATION
-# -----------------------------
-# Required columns in each input dataframe:
-# MOBILE_NUMBER (string or int), LEAD_DATE (datetime-like), LEAD_ORIGIN (string), PROPENSITY_SCORE (float)
-# Optionally: MODEL_NAME/SOURCE, etc.
+# Ensure datetime and normalized text
+df = df.copy()
+df["LEAD_DATE"] = pd.to_datetime(df["LEAD_DATE"])
+df["SOURCE_CHANNEL"] = df["SOURCE_CHANNEL"].str.strip().str.title()
+df["LEAD_ORIGIN"] = df["LEAD_ORIGIN"].astype(str).str.strip()
 
-# Lead origin weight rules for "additional sources" only
-ADDITIONAL_WEIGHTS = {
-    'walkin': 0.15,     # 15%
-    'btl': 0.15,        # 15%
-    'digital': 0.05,    # 5%
-    'telephony': 0.05,  # 5%
-}
-# Note:
-# - These weights are applied when those origins appear as additional sources
-#   within the 90-day lookback for the same MOBILE_NUMBER but different LEAD_ORIGIN than the selected main record.
-# - The final score weighting is normalized to sum to 100% per MOBILE_NUMBER by assigning
-#   base_weight = 1 - sum(additional_weights_present). If additional_weights_present sum to 0.25,
-#   base_weight = 0.75, thus base + extras = 1.0.
-
-# 90-day window size
-LOOKBACK_DAYS = 90
-
-# -----------------------------
-# SAMPLE INPUT (replace with actual loads)
-# -----------------------------
-# Replace these with real loads, e.g. pd.read_csv('file1.csv')
-# Ensure LEAD_DATE is parsed to datetime
-def make_df(seed):
-    np.random.seed(seed)
-    n = 8
-    mobile = np.random.choice(['90001','90002','90003','90004'], size=n)
-    dates = pd.to_datetime('2025-09-30') - pd.to_timedelta(np.random.randint(0,120,size=n), unit='D')
-    origins = np.random.choice(['walkin','btl','digital','telephony'], size=n)
-    score = np.round(np.random.rand(n), 4)
-    model = np.random.choice(['modelA','modelB','modelC'], size=n)
-    return pd.DataFrame({
-        'MOBILE_NUMBER': mobile,
-        'LEAD_DATE': dates,
-        'LEAD_ORIGIN': origins,
-        'PROPENSITY_SCORE': score,
-        'MODEL_NAME': model
-    })
-
-df1 = make_df(1)
-df2 = make_df(2)
-df3 = make_df(3)
-
-# -----------------------------
-# INGEST + UNION
-# -----------------------------
-df = pd.concat([df1, df2, df3], ignore_index=True)
-
-# Standardize LEAD_ORIGIN to lowercase to match weight keys
-df['LEAD_ORIGIN'] = df['LEAD_ORIGIN'].str.strip().str.lower()
-
-# Ensure LEAD_DATE is datetime
-df['LEAD_DATE'] = pd.to_datetime(df['LEAD_DATE'])
-
-# -----------------------------
-# RESTRICT TO LAST 90 DAYS PER MOBILE_NUMBER
-# -----------------------------
-# Interpretation:
-# - For each MOBILE_NUMBER, consider records within the latest 90 days relative to that MOBILE_NUMBER’s max LEAD_DATE.
-# - If a global 90-day window is needed (e.g., relative to "today"), replace anchor_date with pd.Timestamp('today').normalize()
-anchor = df.groupby('MOBILE_NUMBER', as_index=False)['LEAD_DATE'].max().rename(columns={'LEAD_DATE':'MAX_DATE'})
-df = df.merge(anchor, on='MOBILE_NUMBER', how='left')
-df = df[df['LEAD_DATE'] >= (df['MAX_DATE'] - pd.to_timedelta(LOOKBACK_DAYS, unit='D'))].copy()
-df.drop(columns=['MAX_DATE'], inplace=True)
-
-# -----------------------------
-# SELECT MAIN RECORD PER MOBILE_NUMBER
-# -----------------------------
-# Rule:
-# - Choose record with maximum PROPENSITY_SCORE
-# - Ties broken by latest LEAD_DATE
-# - If still ties, keep the first occurrence deterministically via stable sort on index
-df_sorted = df.sort_values(
-    by=['MOBILE_NUMBER','PROPENSITY_SCORE','LEAD_DATE'],
-    ascending=[True, False, False]
-)
-# Keep first row per MOBILE_NUMBER (max propensity, then latest date)
-main_idx = df_sorted.groupby('MOBILE_NUMBER', as_index=False).head(1).index
-df['IS_MAIN'] = False
-df.loc[main_idx, 'IS_MAIN'] = True
-
-# -----------------------------
-# BUILD ADDITIONAL SOURCES PER MOBILE_NUMBER
-# -----------------------------
-# Additional sources are other distinct LEAD_ORIGIN values present in the 90-day window for the same MOBILE_NUMBER,
-# excluding the main record's LEAD_ORIGIN.
-main = df[df['IS_MAIN']].copy()
-others = df[~df['IS_MAIN']].copy()
-
-# Compute additional distinct origins per MOBILE_NUMBER, excluding the main origin
-# Step 1: map MOBILE_NUMBER -> main_origin
-main_origin_map = main.set_index('MOBILE_NUMBER')['LEAD_ORIGIN'].to_dict()
-
-# Step 2: collect distinct origins in others
-additional_origins = (
-    others.groupby('MOBILE_NUMBER')['LEAD_ORIGIN']
-    .apply(lambda s: sorted(set(s)))
-    .reindex(main['MOBILE_NUMBER'])
-)
-
-# Step 3: exclude main origin from additional list per MOBILE_NUMBER
-def exclude_main_origin(mobile, extra_list):
-    if pd.isna(extra_list):
-        return []
-    mo = main_origin_map.get(mobile, None)
-    return [o for o in extra_list if o != mo]
-
-main['ADDITIONAL_ORIGINS'] = [
-    exclude_main_origin(mob, additional_origins.loc[mob] if mob in additional_origins.index else [])
-    for mob in main['MOBILE_NUMBER']
-]
-
-# -----------------------------
-# DYNAMIC WEIGHTING
-# -----------------------------
-# For each MOBILE_NUMBER:
-# - Sum additional weights among ADDITIONAL_ORIGINS using ADDITIONAL_WEIGHTS
-# - Cap sum at < 1.0; if sum >= 1.0, renormalize additional weights proportionally to sum to 1.0 - epsilon (to avoid zero base)
-# - Base weight = 1.0 - sum(additional_weights_present)
-# Final propensity = base_weight * main.PROPENSITY_SCORE
-# Optional: provide per-origin weight allocation breakdown.
-
-def compute_weight_allocation(additional_list):
-    # gather weights for present additional sources
-    weights = {k: ADDITIONAL_WEIGHTS.get(k, 0.0) for k in additional_list}
-    add_sum = sum(weights.values())
-    # If add_sum >= 1.0, scale down proportionally to 0.95 so base gets 0.05 minimal
-    # You may choose a different policy; here we maintain feasibility.
-    if add_sum >= 1.0 and add_sum > 0:
-        factor = 0.95 / add_sum
-        weights = {k: v * factor for k, v in weights.items()}
-        add_sum = sum(weights.values())
-    base = 1.0 - add_sum
-    return base, weights, add_sum
-
-allocations = main['ADDITIONAL_ORIGINS'].apply(compute_weight_allocation)
-main['BASE_WEIGHT'] = allocations.apply(lambda x: x[0])
-main['EXTRA_WEIGHTS_DICT'] = allocations.apply(lambda x: x[1])
-main['EXTRA_WEIGHT_SUM'] = allocations.apply(lambda x: x[2])
-
-# Final weighted propensity for the main record
-main['FINAL_PROPENSITY'] = main['BASE_WEIGHT'] * main['PROPENSITY_SCORE']
-
-# For transparency, also expand extra weights into columns for known origins
-for origin_key in ['walkin','btl','digital','telephony']:
-    main[f'EXTRA_WT_{origin_key}'] = main['EXTRA_WEIGHTS_DICT'].apply(lambda d: float(d.get(origin_key, 0.0)))
-
-# Sanity check: base + sum(extra) should be ~1.0
-main['TOTAL_WEIGHT'] = main['BASE_WEIGHT'] + main['EXTRA_WEIGHT_SUM']
-
-# -----------------------------
-# OPTIONAL: ATTACH COUNTS AND MOST RECENT DATE IN WINDOW
-# -----------------------------
-agg_window = (
-    df.groupby('MOBILE_NUMBER')
+# Step A: per-mobile ordered histories (oldest -> newest)
+hist = (
+    df.sort_values(["MOBILE_NUM","LEAD_DATE"])
+      .groupby("MOBILE_NUM", as_index=False)
       .agg(
-          RECORDS_90D=('MOBILE_NUMBER','size'),
-          LATEST_LEAD_DATE=('LEAD_DATE','max'),
-          DISTINCT_ORIGINS_90D=('LEAD_ORIGIN', lambda s: sorted(set(s)))
+        SOURCE_CHANNELS_ASC=("SOURCE_CHANNEL", lambda s: ",".join(s)),
+        LEAD_ORIGINS_ASC=("LEAD_ORIGIN", lambda s: ",".join(s)),
+        SOURCE_EVENT_DATES=("LEAD_DATE", lambda s: ",".join(s.dt.strftime("%Y-%m-%d")))
       )
+)
+
+# Step B: presence flags per mobile for weighting
+presence = (
+    df.assign(ch=df["SOURCE_CHANNEL"].str.lower())
+      .groupby("MOBILE_NUM")["ch"]
+      .agg(lambda s: set(s))
       .reset_index()
 )
 
-result = (
-    main.merge(agg_window, on='MOBILE_NUMBER', how='left')
-         .sort_values(['FINAL_PROPENSITY','LEAD_DATE'], ascending=[False, False])
-         .reset_index(drop=True)
+def weight_from_sources(src_set):
+    w = 0.0
+    if "walkin" in src_set:     # +0.15
+        w += 0.15
+    if "digital" in src_set:    # +0.05
+        w += 0.05
+    if "telephony" in src_set:  # +0.05
+        w += 0.05
+    return w
+
+presence["SRC_WEIGHT"] = presence["ch"].apply(weight_from_sources).astype(float)
+presence = presence.drop(columns=["ch"])
+
+# Step C: max and 75/25 recompute of propensity
+max_prop = (
+    df.groupby("MOBILE_NUM", as_index=False)["LEAD_PROPENSITY_SCORE"]
+      .max()
+      .rename(columns={"LEAD_PROPENSITY_SCORE":"MAX_PROP"})
 )
 
-# Select and order columns for output
-cols = [
-    'MOBILE_NUMBER',
-    'LEAD_DATE',
-    'LEAD_ORIGIN',
-    'PROPENSITY_SCORE',
-    'FINAL_PROPENSITY',
-    'BASE_WEIGHT',
-    'EXTRA_WEIGHT_SUM',
-    'EXTRA_WT_walkin',
-    'EXTRA_WT_btl',
-    'EXTRA_WT_digital',
-    'EXTRA_WT_telephony',
-    'ADDITIONAL_ORIGINS',
-    'RECORDS_90D',
-    'LATEST_LEAD_DATE',
-    'DISTINCT_ORIGINS_90D',
-]
-existing_cols = [c for c in cols if c in result.columns]
-result = result[existing_cols]
+# recomputed score = 0.75*MAX + 0.25*MAX + channel-weight*MAX = MAX*(1.0 + weight)
+# per directions: “take 75% of it and rest 25% will be added as weightage”
+# Interpreted as base = 75% of MAX; add 25% of MAX plus channel weight on top.
+# Equivalent simplified: score = MAX*(0.75 + 0.25 + weight) = MAX*(1 + weight)
+# If the intent is base 0.75*MAX + weight_as_absolute (0.15 etc) not scaled, change formula accordingly.
+scored = max_prop.merge(presence, on="MOBILE_NUM", how="left").fillna({"SRC_WEIGHT":0.0})
+scored["LEAD_PROPENSITY_SCORE_NEW"] = scored["MAX_PROP"] * (1.0 + scored["SRC_WEIGHT"])
 
-# Display final result
-result
+# Step D: pick latest row per mobile for “latest” fields
+latest_idx = (
+    df.sort_values(["MOBILE_NUM","LEAD_DATE"])
+      .groupby("MOBILE_NUM", as_index=False)
+      .tail(1)
+      .set_index("MOBILE_NUM")
+)
+
+# Step E: first non-null EMAIL per mobile
+email_first = (
+    df.sort_values(["MOBILE_NUM","LEAD_DATE"])
+      .assign(EMAIL_NONNULL=df["EMAIL_ID"].where(df["EMAIL_ID"].notna()))
+      .groupby("MOBILE_NUM", as_index=False)
+      .agg(EMAIL_ID=("EMAIL_NONNULL", lambda s: next((x for x in s if pd.notna(x)), np.nan)))
+)
+
+# Step F: other reductions
+max_cols = (
+    df.groupby("MOBILE_NUM", as_index=False)
+      .agg(
+        LEAD_CONVERSION_POTENTIAL=("LEAD_PROPENSITY_SCORE","max"),  # “maximum score one”
+        ESTIMATED_PURCHASE_DATE=("ESTIMATED_PURCHASE_DATE","max"),
+        AVG_FOLLOWUPS_TO_CONVERSION=("AVG_FOLLOWUPS_TO_CONVERSION","max")
+      )
+)
+
+# Assemble final
+final = (
+    scored[["MOBILE_NUM","LEAD_PROPENSITY_SCORE_NEW","MAX_PROP"]]
+      .merge(latest_idx[[
+          "CUSTOMER_NAME","STATE","LEAD_DATE","ADOBE_ID",
+          "ESTIMATED_CONVERSION_TIME"
+      ]].reset_index(), on="MOBILE_NUM", how="left")
+      .merge(hist, on="MOBILE_NUM", how="left")
+      .merge(email_first, on="MOBILE_NUM", how="left")
+      .merge(max_cols, on="MOBILE_NUM", how="left")
+)
+
+# Rename/compute requested columns
+final = final.rename(columns={
+    "LEAD_PROPENSITY_SCORE_NEW":"LEAD_PROPENSITY_SCORE",
+    "MAX_PROP":"LEAD_CONVERSION_POTENTIAL",  # keep original max as “maximum score one”
+    "SOURCE_CHANNELS_ASC":"SOURCE_CHANNEL",
+    "LEAD_ORIGINS_ASC":"LEAD_ORIGIN"
+})
+final["INSERT_DATERTIME_UST"] = pd.Timestamp.utcnow().tz_localize("UTC")
+
+# Order columns
+final = final[[
+    "CUSTOMER_NAME",
+    "EMAIL_ID",
+    "MOBILE_NUM",
+    "STATE",
+    "LEAD_DATE",
+    "ADOBE_ID",
+    "INSERT_DATERTIME_UST",
+    "LEAD_PROPENSITY_SCORE",
+    "LEAD_CONVERSION_POTENTIAL",
+    "ESTIMATED_CONVERSION_TIME",
+    "ESTIMATED_PURCHASE_DATE",
+    "LEAD_ORIGIN",
+    "SOURCE_CHANNEL",
+    "SOURCE_EVENT_DATES",
+    "AVG_FOLLOWUPS_TO_CONVERSION"
+]]
