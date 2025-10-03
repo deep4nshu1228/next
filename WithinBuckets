@@ -1,0 +1,19 @@
+import pandas as pd
+import numpy as np
+
+# Define bins and labels for bucketing
+bins = [0, 3, 7, 15, 30, np.inf]
+labels = [
+    "within_3_days",
+    "within_4_to_7_days",
+    "within_8_to_15_days",
+    "within_16_to_30_days",
+    "more_than_30_days"
+]
+
+# Create the bucketed column
+df['ESTIMATED_TIME_CONVERSION'] = pd.cut(df['TIME_TO_PURCHASE'], bins=bins, labels=labels, right=True)
+
+# Calculate average propensity score in each bucket
+result = df.groupby('ESTIMATED_TIME_CONVERSION')['LEAD_PROPENSITY_SCORE'].mean().reset_index()
+print(result)
