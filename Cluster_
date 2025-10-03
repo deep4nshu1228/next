@@ -1,0 +1,35 @@
+Hi Raksha,
+
+As part of the warranty cost forecasting model work, I have completed the clustering exercise and prepared additional insights to include in the deck. Please find the updates below:
+
+I ran clustering on the warranty data to group the bike model families:
+
+a. Optimal cluster size = 2 (as per ML model):
+
+Cluster 1: Destini, Glamour, Harley X440, Karizma, Mavrick 440, Maestro, Passion, Pleasure, Xtreme 160, Super Splendor, Xoom, Xpulse 200, Xtreme 200, Xtreme 125
+
+Cluster 2: HF, Splendor
+
+b. Tried with cluster size = 3:
+
+Cluster 1: Destini, Glamour, Maestro, Karizma, Passion, Pleasure, Xtreme 160, Super Splendor, Xpulse 200, Xtreme 200
+
+Cluster 2: HF, Splendor
+
+Cluster 3: Mavrick 440, Harley X440, Xoom, Xtreme 125
+
+Here we can see all the newer models (age < 24 months) grouped into Cluster 3.
+
+We will include one slide on Variable Importance in the deck.
+
+We will also include one slide on Different Iterations / Milestones of the forecasting model:
+
+Using EDA, identified VIDA as highly volatile and removed it.
+
+Extended historical warranty cost data from 2018 back to 2015, improving results.
+
+Excluded some plants (HP3N and HSPG).
+
+Conducted model-level analysis of warranty costing to identify cost per claim and cost per unit.
+
+Ran clustering to understand model family groupings.
