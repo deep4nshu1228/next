@@ -1,7 +1,15 @@
 import pandas as pd
 import numpy as np
+import matplotlib.pyplot as plt
+import seaborn as sns
+from scipy.stats import f_oneway
+from sklearn.metrics import roc_curve
+from sklearn.cluster import KMeans
 
-# Define bins and labels for bucketing
+# Sample DataFrame, replace with your actual df
+# df = pd.read_csv("your_data.csv")
+
+# STEP 1: Create TIME_TO_PURCHASE buckets
 bins = [0, 3, 7, 15, 30, np.inf]
 labels = [
     "within_3_days",
@@ -10,10 +18,40 @@ labels = [
     "within_16_to_30_days",
     "more_than_30_days"
 ]
-
-# Create the bucketed column
 df['ESTIMATED_TIME_CONVERSION'] = pd.cut(df['TIME_TO_PURCHASE'], bins=bins, labels=labels, right=True)
 
-# Calculate average propensity score in each bucket
-result = df.groupby('ESTIMATED_TIME_CONVERSION')['LEAD_PROPENSITY_SCORE'].mean().reset_index()
-print(result)
+# STEP 2: Visualize propensity distributions by bucket
+plt.figure(figsize=(10, 6))
+sns.boxplot(x='ESTIMATED_TIME_CONVERSION', y='LEAD_PROPENSITY_SCORE', data=df)
+plt.title("Propensity Score by Time to Purchase Bucket")
+plt.xticks(rotation=30)
+plt.tight_layout()
+plt.show()
+
+# STEP 3: Statistical test (ANOVA) for propensity across buckets
+groups = [group['LEAD_PROPENSITY_SCORE'].values for name, group in df.groupby('ESTIMATED_TIME_CONVERSION')]
+anova_result = f_oneway(*groups)
+print(f'ANOVA F-statistic: {anova_result.statistic:.3f}')
+print(f'ANOVA P-value: {anova_result.pvalue:.3e}')
+
+# STEP 4: Quantile-based segmentation
+df['PROPENSITY_QUINTILE'] = pd.qcut(df['LEAD_PROPENSITY_SCORE'], 5, labels=False) + 1
+quantile_agg = df.groupby('PROPENSITY_QUINTILE')['TIME_TO_PURCHASE'].agg(['mean', 'count'])
+print("\nQuantile-based TIME_TO_PURCHASE summary:\n", quantile_agg)
+
+# STEP 5: ROC-based threshold for "fast" conversion (<=7 days)
+df['fast_conversion'] = (df['TIME_TO_PURCHASE'] <= 7).astype(int)
+fpr, tpr, thresholds = roc_curve(df['fast_conversion'], df['LEAD_PROPENSITY_SCORE'])
+optimal_idx = np.argmax(tpr - fpr)
+optimal_threshold = thresholds[optimal_idx]
+print('\nOptimal propensity threshold for fast conversion (ROC-based):', optimal_threshold)
+
+# STEP 6: Clustering (optional, for exploratory segmentation)
+X = df[['LEAD_PROPENSITY_SCORE', 'TIME_TO_PURCHASE']].copy()
+kmeans = KMeans(n_clusters=5, random_state=42).fit(X)
+df['CLUSTER'] = kmeans.labels_
+cluster_agg = df.groupby('CLUSTER')[['LEAD_PROPENSITY_SCORE', 'TIME_TO_PURCHASE']].mean()
+print("\nCluster means (propensity, time to purchase):\n", cluster_agg)
+
+# df now contains:
+# 'ESTIMATED_TIME_CONVERSION', 'PROPENSITY_QUINTILE', 'fast_conversion', 'CLUSTER'
