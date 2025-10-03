@@ -1,0 +1,37 @@
+import numpy as np
+
+# 1) Get model classes as produced by scikit-learn
+classes_model = list(clf.classes_)  # predict_proba columns are aligned to this [web:18]
+
+# 2) Define the canonical order wanted
+order = ['within_3','within_4_7','within_8_15','within_16_30','gt_30','no_conversion']  # customize labels to match training [web:18]
+
+# 3) Build reindexer from current classes -> desired order
+#    This will raise KeyError if a required class is missing, which is useful to catch issues.
+col_idx = [classes_model.index(c) for c in order]  # positions of desired classes in current output [web:18]
+
+# 4) Reorder proba columns
+proba_ord = proba[:, col_idx]  # columns now in canonical order [web:18]
+
+# 5) If y_pred_labels are strings from model.predict, remap to indices of canonical order
+y_pred_labels_ord = y_pred_labels  # ensure these strings exactly match 'order' entries [web:18]
+y_pred_idx = np.array([order.index(lbl) for lbl in y_pred_labels_ord])  # 0..5 [web:18]
+
+# 6) Cumulative “future” sums across time buckets (exclude 'no_conversion')
+time_only = proba_ord[:, :5]  # within_3..gt_30 [web:18]
+time_cum = np.cumsum(time_only[:, ::-1], axis=1)[:, ::-1]  # current + later buckets [web:18]
+
+# 7) Build propensity per row per rule
+n = proba_ord.shape[0]
+rows = np.arange(n)
+propensity = np.empty(n, dtype=float)
+
+mask_time = y_pred_idx < 5
+propensity[mask_time] = time_cum[rows[mask_time], y_pred_idx[mask_time]]  # sums for time buckets [web:18]
+
+mask_no = ~mask_time  # idx == 5
+propensity[mask_no] = 1.0 - proba_ord[rows[mask_no], 5]  # 1 - P(no_conversion) [web:18]
+
+# 8) Attach to results
+res['PREDICTED_CONVERSION_TIME'] = y_pred_labels_ord  # unchanged labels, but consistent with order [web:18]
+res['PROPENSITY_SCORE'] = propensity  # final score [web:18]
