@@ -1,1 +1,172 @@
-Final Propensity Score Calculation LogicIdentify Unique LeadsUse mobile number as the unique identifier for each lead.A lead can come from one or more sources:DigitalWalk-inTelephonySource-Based WeightageDigital: 5%Telephony: 5%Walk-in: 15%Multiple Source HandlingIf a mobile number has multiple leads from different sources, then:Find the maximum propensity score among all those leads.Take 75% of this maximum score as the base score.For each additional source (present for that same mobile number), add the corresponding percentage of the maximum score as per weightage.Score Calculation FormulaLet:[ P_{\text{max}} ] = Maximum propensity score for the mobile number[ W_{\text{digital}} = 0.05 ][ W_{\text{telephony}} = 0.05 ][ W_{\text{walkin}} = 0.15 ][ S ] = set of sources for that mobile numberFinal Propensity Score:Note:[ S_{\text{additional}} ] means all other sources apart from the one where [ P_{\text{max}} ] came from.If there’s only one source, the score = [ P_{\text{max}} ] (no 75% rule applied).ExampleMobile Number: 9876543210Leads:Digital: 0.62Walk-in: 0.78Telephony: 0.55[ P_{\text{max}} = 0.78] (Walk-in)Base score = [ 0.75 \times 0.78 = 0.585 ]Additional sources: Digital (5%), Telephony (5%)Extra = [ 0.05 \times 0.78 + 0.05 \times 0.78 = 0.039 + 0.039 = 0.078 ]Final Score = [ 0.585 + 0.078 = 0.663 ]
+Final Propensity Score Calculation Logic
+Identify Unique Leads
+
+Use mobile number as the unique identifier for each lead.
+
+A lead can come from one or more sources:
+
+Digital
+
+Walk-in
+
+Telephony
+
+Source-Based Weightage
+
+Digital: 5%
+
+Telephony: 5%
+
+Walk-in: 15%
+
+Multiple Source Handling
+
+If a mobile number has multiple leads from different sources, then:
+
+Find the maximum propensity score among all those leads.
+
+Take 75% of this maximum score as the base score.
+
+For each additional source (present for that same mobile number), add the corresponding percentage of the maximum score as per weightage.
+
+Score Calculation Formula
+
+Let:
+
+P
+max
+P 
+max
+  = Maximum propensity score for the mobile number
+
+W
+digital
+=
+0.05
+W 
+digital
+ =0.05
+
+W
+telephony
+=
+0.05
+W 
+telephony
+ =0.05
+
+W
+walkin
+=
+0.15
+W 
+walkin
+ =0.15
+
+S
+S = set of sources for that mobile number
+
+Final Propensity Score:
+
+Final Score
+=
+0.75
+×
+P
+max
++
+∑
+s
+∈
+S
+additional
+W
+s
+×
+P
+max
+Final Score=0.75×P 
+max
+ + 
+s∈S 
+additional
+ 
+∑
+ W 
+s
+ ×P 
+max
+ 
+Note:
+
+S
+additional
+S 
+additional
+  means all other sources apart from the one where 
+P
+max
+P 
+max
+  came from.
+
+If there’s only one source, the score = 
+P
+max
+P 
+max
+  (no 75% rule applied).
+
+Example
+
+Mobile Number: 9876543210
+
+Leads:
+
+Digital: 0.62
+
+Walk-in: 0.78
+
+Telephony: 0.55
+
+P
+max
+=
+0.78
+P 
+max
+ =0.78 (Walk-in)
+
+Base score = 
+0.75
+×
+0.78
+=
+0.585
+0.75×0.78=0.585
+
+Additional sources: Digital (5%), Telephony (5%)
+
+Extra = 
+0.05
+×
+0.78
++
+0.05
+×
+0.78
+=
+0.039
++
+0.039
+=
+0.078
+0.05×0.78+0.05×0.78=0.039+0.039=0.078
+
+Final Score = 
+0.585
++
+0.078
+=
+0.663
+0.585+0.078=0.663
