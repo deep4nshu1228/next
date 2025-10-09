@@ -1,0 +1,373 @@
+# ============================================================================
+# COMPREHENSIVE WARRANTY DATA EDA PIPELINE
+# Volatility Analysis for Bike Models
+# ============================================================================
+
+# Import required libraries
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+import seaborn as sns
+from scipy import stats
+import warnings
+warnings.filterwarnings('ignore')
+
+# Set visualization style
+sns.set_style("whitegrid")
+plt.rcParams['figure.figsize'] = (14, 8)
+%matplotlib inline
+
+# ============================================================================
+# 1. LOAD AND EXPLORE DATA
+# ============================================================================
+
+# Load the preprocessed warranty data
+# df = pd.read_csv('warranty_data.csv')  # Uncomment and adjust path
+
+print("="*80)
+print("DATASET OVERVIEW")
+print("="*80)
+print(f"Dataset Shape: {df.shape}")
+print(f"
+Columns: {df.columns.tolist()}")
+print(f"
+First few rows:")
+print(df.head())
+print(f"
+Data Types:")
+print(df.dtypes)
+print(f"
+Basic Statistics:")
+print(df.describe())
+print(f"
+Missing Values:")
+print(df.isnull().sum())
+
+# ============================================================================
+# 2. CALCULATE VOLATILITY METRICS
+# ============================================================================
+
+def calculate_volatility_metrics(df):
+    """Calculate comprehensive volatility metrics for warranty costs"""
+    volatility_stats = df.groupby('BIKE_GROUPED').agg({
+        'COST_PER_UNIT': [
+            'mean', 
+            'std', 
+            'median',
+            ('cv', lambda x: (x.std() / x.mean()) * 100 if x.mean() != 0 else 0),
+            'min',
+            'max',
+            ('range', lambda x: x.max() - x.min()),
+            ('iqr', lambda x: x.quantile(0.75) - x.quantile(0.25))
+        ],
+        'WARRANTY_COST': [
+            'mean',
+            'std',
+            'sum',
+            ('cv', lambda x: (x.std() / x.mean()) * 100 if x.mean() != 0 else 0)
+        ],
+        'VOLUME': ['sum', 'mean']
+    }).round(2)
+    
+    volatility_stats.columns = ['_'.join(col).strip() for col in volatility_stats.columns.values]
+    volatility_stats = volatility_stats.reset_index()
+    
+    return volatility_stats
+
+volatility_df = calculate_volatility_metrics(df)
+
+print("
+" + "="*80)
+print("VOLATILITY METRICS BY BIKE MODEL")
+print("="*80)
+print(volatility_df.sort_values('COST_PER_UNIT_cv', ascending=False))
+
+# Identify highly volatile models
+highly_volatile = volatility_df[volatility_df['COST_PER_UNIT_cv'] > 50].sort_values('COST_PER_UNIT_cv', ascending=False)
+print("
+" + "="*80)
+print(f"HIGHLY VOLATILE MODELS (CV > 50%): {len(highly_volatile)} models")
+print("="*80)
+print(highly_volatile[['BIKE_GROUPED', 'COST_PER_UNIT_mean', 'COST_PER_UNIT_std', 'COST_PER_UNIT_cv']])
+
+# ============================================================================
+# 3. TIME-BASED VOLATILITY ANALYSIS
+# ============================================================================
+
+def time_based_volatility(df):
+    """Analyze cost volatility patterns over time dimensions"""
+    warranty_month_stats = df.groupby(['BIKE_GROUPED', 'WARRANTY_MONTH']).agg({
+        'COST_PER_UNIT': ['mean', 'std'],
+        'WARRANTY_COST': 'sum',
+        'VOLUME': 'sum'
+    }).reset_index()
+    warranty_month_stats.columns = ['_'.join(col).strip() if col[1] else col[0] 
+                                     for col in warranty_month_stats.columns.values]
+    
+    age_stats = df.groupby(['BIKE_GROUPED', 'AGE']).agg({
+        'COST_PER_UNIT': ['mean', 'std'],
+        'WARRANTY_COST': 'sum',
+        'VOLUME': 'sum'
+    }).reset_index()
+    age_stats.columns = ['_'.join(col).strip() if col[1] else col[0] 
+                         for col in age_stats.columns.values]
+    
+    return warranty_month_stats, age_stats
+
+warranty_month_stats, age_stats = time_based_volatility(df)
+
+print("
+" + "="*80)
+print("WARRANTY COST TRENDS BY AGE")
+print("="*80)
+print(age_stats.head(20))
+
+# ============================================================================
+# 4. OUTLIER DETECTION
+# ============================================================================
+
+def detect_outliers(df):
+    """Identify outlier observations using Z-score and IQR methods"""
+    outlier_results = []
+    
+    for bike in df['BIKE_GROUPED'].unique():
+        bike_data = df[df['BIKE_GROUPED'] == bike].copy()
+        
+        # Z-score method
+        bike_data['z_score'] = np.abs(stats.zscore(bike_data['COST_PER_UNIT']))
+        z_outliers = bike_data[bike_data['z_score'] > 3]
+        
+        # IQR method
+        Q1 = bike_data['COST_PER_UNIT'].quantile(0.25)
+        Q3 = bike_data['COST_PER_UNIT'].quantile(0.75)
+        IQR = Q3 - Q1
+        iqr_outliers = bike_data[
+            (bike_data['COST_PER_UNIT'] < (Q1 - 1.5 * IQR)) | 
+            (bike_data['COST_PER_UNIT'] > (Q3 + 1.5 * IQR))
+        ]
+        
+        outlier_results.append({
+            'BIKE_GROUPED': bike,
+            'total_records': len(bike_data),
+            'z_score_outliers': len(z_outliers),
+            'iqr_outliers': len(iqr_outliers),
+            'outlier_percentage': round((len(iqr_outliers) / len(bike_data)) * 100, 2)
+        })
+    
+    outlier_df = pd.DataFrame(outlier_results).sort_values('outlier_percentage', ascending=False)
+    return outlier_df
+
+outlier_summary = detect_outliers(df)
+
+print("
+" + "="*80)
+print("OUTLIER ANALYSIS BY BIKE MODEL")
+print("="*80)
+print(outlier_summary.head(15))
+
+# ============================================================================
+# 5. COMPREHENSIVE STATISTICS TABLE
+# ============================================================================
+
+def create_comprehensive_stats_table(df, volatility_df):
+    """Generate comprehensive statistics summary table"""
+    stats_table = df.groupby('BIKE_GROUPED').agg({
+        'WARRANTY_COST': ['sum', 'mean', 'std', 'min', 'max'],
+        'COST_PER_UNIT': ['mean', 'std', 'median'],
+        'VOLUME': ['sum', 'mean'],
+        'AGE': ['min', 'max'],
+        'WARRANTY_MONTH': 'nunique',
+        'DISPATCH_MONTH': 'nunique'
+    }).round(2)
+    
+    stats_table.columns = ['_'.join(col).strip() for col in stats_table.columns.values]
+    stats_table = stats_table.reset_index()
+    
+    stats_table = stats_table.merge(
+        volatility_df[['BIKE_GROUPED', 'COST_PER_UNIT_cv', 'WARRANTY_COST_cv']], 
+        on='BIKE_GROUPED', 
+        how='left'
+    )
+    
+    stats_table['volatility_category'] = pd.cut(
+        stats_table['COST_PER_UNIT_cv'],
+        bins=[0, 25, 50, 100, float('inf')],
+        labels=['Low', 'Medium', 'High', 'Very High']
+    )
+    
+    return stats_table
+
+comprehensive_stats = create_comprehensive_stats_table(df, volatility_df)
+
+print("
+" + "="*80)
+print("COMPREHENSIVE STATISTICS TABLE")
+print("="*80)
+print(comprehensive_stats.sort_values('COST_PER_UNIT_cv', ascending=False))
+
+# ============================================================================
+# 6. VISUALIZATIONS
+# ============================================================================
+
+# Chart 1: Top Volatile Models - Coefficient of Variation
+plt.figure(figsize=(14, 8))
+top_volatile = volatility_df.nlargest(15, 'COST_PER_UNIT_cv')
+colors = plt.cm.RdYlGn_r(np.linspace(0.2, 0.8, len(top_volatile)))
+plt.barh(top_volatile['BIKE_GROUPED'], top_volatile['COST_PER_UNIT_cv'], color=colors)
+plt.xlabel('Coefficient of Variation (%)', fontsize=12, fontweight='bold')
+plt.ylabel('Bike Model', fontsize=12, fontweight='bold')
+plt.title('Top 15 Most Volatile Bike Models by Cost Per Unit (CV%)', fontsize=14, fontweight='bold', pad=20)
+plt.axvline(x=50, color='red', linestyle='--', linewidth=2, label='High Volatility Threshold (50%)')
+plt.legend()
+plt.grid(axis='x', alpha=0.3)
+plt.tight_layout()
+plt.savefig('chart_1_top_volatile_models.png', dpi=300, bbox_inches='tight')
+plt.show()
+print("✓ Chart 1 saved: chart_1_top_volatile_models.png")
+
+# Chart 2: Volatility vs Total Warranty Cost Scatter
+plt.figure(figsize=(14, 8))
+scatter_data = volatility_df.copy()
+plt.scatter(scatter_data['WARRANTY_COST_sum'], scatter_data['COST_PER_UNIT_cv'],
+           s=scatter_data['VOLUME_sum']/10, alpha=0.6, c=scatter_data['COST_PER_UNIT_cv'], cmap='YlOrRd')
+plt.xlabel('Total Warranty Cost', fontsize=12, fontweight='bold')
+plt.ylabel('Cost Per Unit Volatility (CV%)', fontsize=12, fontweight='bold')
+plt.title('Warranty Cost vs Volatility (Bubble size = Volume)', fontsize=14, fontweight='bold', pad=20)
+plt.axhline(y=50, color='red', linestyle='--', linewidth=2, alpha=0.5, label='High Volatility Threshold')
+plt.colorbar(label='CV%')
+plt.legend()
+plt.grid(alpha=0.3)
+plt.tight_layout()
+plt.savefig('chart_2_cost_vs_volatility.png', dpi=300, bbox_inches='tight')
+plt.show()
+print("✓ Chart 2 saved: chart_2_cost_vs_volatility.png")
+
+# Chart 3: Cost Per Unit Distribution by Volatility Category
+plt.figure(figsize=(14, 8))
+df_with_category = df.merge(comprehensive_stats[['BIKE_GROUPED', 'volatility_category']], on='BIKE_GROUPED', how='left')
+sns.boxplot(data=df_with_category, x='volatility_category', y='COST_PER_UNIT', palette='Set2', showfliers=False)
+sns.stripplot(data=df_with_category, x='volatility_category', y='COST_PER_UNIT', color='black', alpha=0.3, size=2)
+plt.xlabel('Volatility Category', fontsize=12, fontweight='bold')
+plt.ylabel('Cost Per Unit', fontsize=12, fontweight='bold')
+plt.title('Cost Per Unit Distribution by Volatility Category', fontsize=14, fontweight='bold', pad=20)
+plt.grid(axis='y', alpha=0.3)
+plt.tight_layout()
+plt.savefig('chart_3_cost_distribution_by_volatility.png', dpi=300, bbox_inches='tight')
+plt.show()
+print("✓ Chart 3 saved: chart_3_cost_distribution_by_volatility.png")
+
+# Chart 4: Time Series - Cost Per Unit Trends for Top Volatile Models
+plt.figure(figsize=(16, 10))
+top_5_volatile = volatility_df.nlargest(5, 'COST_PER_UNIT_cv')['BIKE_GROUPED'].tolist()
+for i, bike in enumerate(top_5_volatile):
+    bike_data = df[df['BIKE_GROUPED'] == bike].copy()
+    bike_data = bike_data.sort_values('WARRANTY_MONTH')
+    plt.subplot(3, 2, i+1)
+    plt.plot(bike_data['WARRANTY_MONTH'], bike_data['COST_PER_UNIT'], marker='o', linewidth=2, markersize=4)
+    plt.fill_between(bike_data['WARRANTY_MONTH'], bike_data['COST_PER_UNIT'], alpha=0.3)
+    mean_cost = bike_data['COST_PER_UNIT'].mean()
+    plt.axhline(y=mean_cost, color='red', linestyle='--', alpha=0.7, label=f'Mean: {mean_cost:.2f}')
+    plt.title(f'{bike}', fontsize=11, fontweight='bold')
+    plt.xlabel('Warranty Month', fontsize=10)
+    plt.ylabel('Cost Per Unit', fontsize=10)
+    plt.legend(fontsize=8)
+    plt.grid(alpha=0.3)
+    plt.xticks(rotation=45)
+plt.suptitle('Cost Per Unit Trends - Top 5 Most Volatile Models', fontsize=14, fontweight='bold', y=1.00)
+plt.tight_layout()
+plt.savefig('chart_4_time_series_volatile_models.png', dpi=300, bbox_inches='tight')
+plt.show()
+print("✓ Chart 4 saved: chart_4_time_series_volatile_models.png")
+
+# Chart 5: Warranty Cost by Age Groups
+plt.figure(figsize=(14, 8))
+age_grouped = df.groupby('AGE').agg({'WARRANTY_COST': 'sum', 'VOLUME': 'sum', 'COST_PER_UNIT': 'mean'}).reset_index()
+fig, ax1 = plt.subplots(figsize=(14, 8))
+color1 = 'tab:blue'
+ax1.set_xlabel('Age (Months)', fontsize=12, fontweight='bold')
+ax1.set_ylabel('Total Warranty Cost', color=color1, fontsize=12, fontweight='bold')
+ax1.bar(age_grouped['AGE'], age_grouped['WARRANTY_COST'], color=color1, alpha=0.6, label='Total Warranty Cost')
+ax1.tick_params(axis='y', labelcolor=color1)
+ax1.grid(alpha=0.3)
+ax2 = ax1.twinx()
+color2 = 'tab:red'
+ax2.set_ylabel('Average Cost Per Unit', color=color2, fontsize=12, fontweight='bold')
+ax2.plot(age_grouped['AGE'], age_grouped['COST_PER_UNIT'], color=color2, marker='o', linewidth=2, markersize=6, label='Avg Cost Per Unit')
+ax2.tick_params(axis='y', labelcolor=color2)
+plt.title('Warranty Cost and Cost Per Unit by Age', fontsize=14, fontweight='bold', pad=20)
+fig.legend(loc='upper left', bbox_to_anchor=(0.1, 0.9))
+plt.tight_layout()
+plt.savefig('chart_5_cost_by_age.png', dpi=300, bbox_inches='tight')
+plt.show()
+print("✓ Chart 5 saved: chart_5_cost_by_age.png")
+
+# Chart 6: Heatmap - Average Cost Per Unit by Model and Age
+plt.figure(figsize=(16, 10))
+top_models = volatility_df.nlargest(10, 'COST_PER_UNIT_cv')['BIKE_GROUPED'].tolist()
+heatmap_data = df[df['BIKE_GROUPED'].isin(top_models)].pivot_table(values='COST_PER_UNIT', index='BIKE_GROUPED', columns='AGE', aggfunc='mean')
+sns.heatmap(heatmap_data, annot=True, fmt='.1f', cmap='YlOrRd', linewidths=0.5, cbar_kws={'label': 'Cost Per Unit'})
+plt.xlabel('Age (Months)', fontsize=12, fontweight='bold')
+plt.ylabel('Bike Model', fontsize=12, fontweight='bold')
+plt.title('Cost Per Unit Heatmap - Top 10 Volatile Models by Age', fontsize=14, fontweight='bold', pad=20)
+plt.tight_layout()
+plt.savefig('chart_6_heatmap_cost_by_age.png', dpi=300, bbox_inches='tight')
+plt.show()
+print("✓ Chart 6 saved: chart_6_heatmap_cost_by_age.png")
+
+# ============================================================================
+# 7. SUMMARY STATISTICS AND EXPORT
+# ============================================================================
+
+# Create summary report
+summary_report = {
+    'total_models': df['BIKE_GROUPED'].nunique(),
+    'total_warranty_months': df['WARRANTY_MONTH'].nunique(),
+    'total_volume': df['VOLUME'].sum(),
+    'total_warranty_cost': df['WARRANTY_COST'].sum(),
+    'avg_cost_per_unit': df['COST_PER_UNIT'].mean(),
+    'highly_volatile_models': len(volatility_df[volatility_df['COST_PER_UNIT_cv'] > 50]),
+    'medium_volatile_models': len(volatility_df[(volatility_df['COST_PER_UNIT_cv'] >= 25) & (volatility_df['COST_PER_UNIT_cv'] <= 50)]),
+    'low_volatile_models': len(volatility_df[volatility_df['COST_PER_UNIT_cv'] < 25])
+}
+
+summary_df = pd.DataFrame([summary_report]).T
+summary_df.columns = ['Value']
+summary_df.index.name = 'Metric'
+
+print("
+" + "="*80)
+print("EXECUTIVE SUMMARY")
+print("="*80)
+print(summary_df)
+
+# Export all results to Excel
+with pd.ExcelWriter('warranty_eda_analysis_results.xlsx') as writer:
+    comprehensive_stats.to_excel(writer, sheet_name='Comprehensive_Statistics', index=False)
+    volatility_df.to_excel(writer, sheet_name='Volatility_Metrics', index=False)
+    outlier_summary.to_excel(writer, sheet_name='Outlier_Analysis', index=False)
+    summary_df.to_excel(writer, sheet_name='Executive_Summary')
+    highly_volatile.to_excel(writer, sheet_name='High_Volatility_Models', index=False)
+    warranty_month_stats.to_excel(writer, sheet_name='Warranty_Month_Trends', index=False)
+    age_stats.to_excel(writer, sheet_name='Age_Trends', index=False)
+
+print("
+✓ All results exported to 'warranty_eda_analysis_results.xlsx'")
+
+# Export CSV files
+comprehensive_stats.to_csv('warranty_comprehensive_statistics.csv', index=False)
+print("✓ Statistics table exported to 'warranty_comprehensive_statistics.csv'")
+
+print("
+" + "="*80)
+print("EDA PIPELINE COMPLETED SUCCESSFULLY")
+print("="*80)
+print("
+Outputs Generated:")
+print("  • 6 PNG chart files")
+print("  • 1 Excel file with 7 sheets")
+print("  • 1 CSV summary file")
+print("
+Key Findings:")
+print(f"  • Total Models Analyzed: {summary_report['total_models']}")
+print(f"  • High Volatility Models (CV>50%): {summary_report['highly_volatile_models']}")
+print(f"  • Total Warranty Cost: {summary_report['total_warranty_cost']:,.2f}")
