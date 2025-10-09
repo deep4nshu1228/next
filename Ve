@@ -1,406 +1,7 @@
 # ============================================================================
-# COMPREHENSIVE WARRANTY DATA EDA PIPELINE
-# Volatility Analysis for Bike Models
-# ============================================================================
-
-# Import required libraries
-import pandas as pd
-import numpy as np
-import matplotlib.pyplot as plt
-import seaborn as sns
-from scipy import stats
-import warnings
-warnings.filterwarnings('ignore')
-
-# Set visualization style
-sns.set_style("whitegrid")
-plt.rcParams['figure.figsize'] = (14, 8)
-%matplotlib inline
-
-# ============================================================================
-# 1. LOAD AND EXPLORE DATA
-# ============================================================================
-
-# Load the preprocessed warranty data
-# df = pd.read_csv('warranty_data.csv')  # Uncomment and adjust path
-
-print("="*80)
-print("DATASET OVERVIEW")
-print("="*80)
-print(f"Dataset Shape: {df.shape}")
-print(f"
-Columns: {df.columns.tolist()}")
-print(f"
-First few rows:")
-print(df.head())
-print(f"
-Data Types:")
-print(df.dtypes)
-print(f"
-Basic Statistics:")
-print(df.describe())
-print(f"
-Missing Values:")
-print(df.isnull().sum())
-
-# ============================================================================
-# 2. CALCULATE VOLATILITY METRICS
-# ============================================================================
-
-def calculate_volatility_metrics(df):
-    """Calculate comprehensive volatility metrics for warranty costs"""
-    volatility_stats = df.groupby('BIKE_GROUPED').agg({
-        'COST_PER_UNIT': [
-            'mean', 
-            'std', 
-            'median',
-            ('cv', lambda x: (x.std() / x.mean()) * 100 if x.mean() != 0 else 0),
-            'min',
-            'max',
-            ('range', lambda x: x.max() - x.min()),
-            ('iqr', lambda x: x.quantile(0.75) - x.quantile(0.25))
-        ],
-        'WARRANTY_COST': [
-            'mean',
-            'std',
-            'sum',
-            ('cv', lambda x: (x.std() / x.mean()) * 100 if x.mean() != 0 else 0)
-        ],
-        'VOLUME': ['sum', 'mean']
-    }).round(2)
-    
-    volatility_stats.columns = ['_'.join(col).strip() for col in volatility_stats.columns.values]
-    volatility_stats = volatility_stats.reset_index()
-    
-    return volatility_stats
-
-volatility_df = calculate_volatility_metrics(df)
-
-print("
-" + "="*80)
-print("VOLATILITY METRICS BY BIKE MODEL")
-print("="*80)
-print(volatility_df.sort_values('COST_PER_UNIT_cv', ascending=False))
-
-# Identify highly volatile models
-highly_volatile = volatility_df[volatility_df['COST_PER_UNIT_cv'] > 50].sort_values('COST_PER_UNIT_cv', ascending=False)
-print("
-" + "="*80)
-print(f"HIGHLY VOLATILE MODELS (CV > 50%): {len(highly_volatile)} models")
-print("="*80)
-print(highly_volatile[['BIKE_GROUPED', 'COST_PER_UNIT_mean', 'COST_PER_UNIT_std', 'COST_PER_UNIT_cv']])
-
-# ============================================================================
-# 3. TIME-BASED VOLATILITY ANALYSIS
-# ============================================================================
-
-def time_based_volatility(df):
-    """Analyze cost volatility patterns over time dimensions"""
-    warranty_month_stats = df.groupby(['BIKE_GROUPED', 'WARRANTY_MONTH']).agg({
-        'COST_PER_UNIT': ['mean', 'std'],
-        'WARRANTY_COST': 'sum',
-        'VOLUME': 'sum'
-    }).reset_index()
-    warranty_month_stats.columns = ['_'.join(col).strip() if col[1] else col[0] 
-                                     for col in warranty_month_stats.columns.values]
-    
-    age_stats = df.groupby(['BIKE_GROUPED', 'AGE']).agg({
-        'COST_PER_UNIT': ['mean', 'std'],
-        'WARRANTY_COST': 'sum',
-        'VOLUME': 'sum'
-    }).reset_index()
-    age_stats.columns = ['_'.join(col).strip() if col[1] else col[0] 
-                         for col in age_stats.columns.values]
-    
-    return warranty_month_stats, age_stats
-
-warranty_month_stats, age_stats = time_based_volatility(df)
-
-print("
-" + "="*80)
-print("WARRANTY COST TRENDS BY AGE")
-print("="*80)
-print(age_stats.head(20))
-
-# ============================================================================
-# 4. OUTLIER DETECTION
-# ============================================================================
-
-def detect_outliers(df):
-    """Identify outlier observations using Z-score and IQR methods"""
-    outlier_results = []
-    
-    for bike in df['BIKE_GROUPED'].unique():
-        bike_data = df[df['BIKE_GROUPED'] == bike].copy()
-        
-        # Z-score method
-        bike_data['z_score'] = np.abs(stats.zscore(bike_data['COST_PER_UNIT']))
-        z_outliers = bike_data[bike_data['z_score'] > 3]
-        
-        # IQR method
-        Q1 = bike_data['COST_PER_UNIT'].quantile(0.25)
-        Q3 = bike_data['COST_PER_UNIT'].quantile(0.75)
-        IQR = Q3 - Q1
-        iqr_outliers = bike_data[
-            (bike_data['COST_PER_UNIT'] < (Q1 - 1.5 * IQR)) | 
-            (bike_data['COST_PER_UNIT'] > (Q3 + 1.5 * IQR))
-        ]
-        
-        outlier_results.append({
-            'BIKE_GROUPED': bike,
-            'total_records': len(bike_data),
-            'z_score_outliers': len(z_outliers),
-            'iqr_outliers': len(iqr_outliers),
-            'outlier_percentage': round((len(iqr_outliers) / len(bike_data)) * 100, 2)
-        })
-    
-    outlier_df = pd.DataFrame(outlier_results).sort_values('outlier_percentage', ascending=False)
-    return outlier_df
-
-outlier_summary = detect_outliers(df)
-
-print("
-" + "="*80)
-print("OUTLIER ANALYSIS BY BIKE MODEL")
-print("="*80)
-print(outlier_summary.head(15))
-
-# ============================================================================
-# 5. COMPREHENSIVE STATISTICS TABLE
-# ============================================================================
-
-def create_comprehensive_stats_table(df, volatility_df):
-    """Generate comprehensive statistics summary table"""
-    stats_table = df.groupby('BIKE_GROUPED').agg({
-        'WARRANTY_COST': ['sum', 'mean', 'std', 'min', 'max'],
-        'COST_PER_UNIT': ['mean', 'std', 'median'],
-        'VOLUME': ['sum', 'mean'],
-        'AGE': ['min', 'max'],
-        'WARRANTY_MONTH': 'nunique',
-        'DISPATCH_MONTH': 'nunique'
-    }).round(2)
-    
-    stats_table.columns = ['_'.join(col).strip() for col in stats_table.columns.values]
-    stats_table = stats_table.reset_index()
-    
-    stats_table = stats_table.merge(
-        volatility_df[['BIKE_GROUPED', 'COST_PER_UNIT_cv', 'WARRANTY_COST_cv']], 
-        on='BIKE_GROUPED', 
-        how='left'
-    )
-    
-    stats_table['volatility_category'] = pd.cut(
-        stats_table['COST_PER_UNIT_cv'],
-        bins=[0, 25, 50, 100, float('inf')],
-        labels=['Low', 'Medium', 'High', 'Very High']
-    )
-    
-    return stats_table
-
-comprehensive_stats = create_comprehensive_stats_table(df, volatility_df)
-
-print("
-" + "="*80)
-print("COMPREHENSIVE STATISTICS TABLE")
-print("="*80)
-print(comprehensive_stats.sort_values('COST_PER_UNIT_cv', ascending=False))
-
-# ============================================================================
-# 6. VISUALIZATIONS
-# ============================================================================
-
-# Chart 1: Top Volatile Models - Coefficient of Variation
-plt.figure(figsize=(14, 8))
-top_volatile = volatility_df.nlargest(15, 'COST_PER_UNIT_cv')
-colors = plt.cm.RdYlGn_r(np.linspace(0.2, 0.8, len(top_volatile)))
-plt.barh(top_volatile['BIKE_GROUPED'], top_volatile['COST_PER_UNIT_cv'], color=colors)
-plt.xlabel('Coefficient of Variation (%)', fontsize=12, fontweight='bold')
-plt.ylabel('Bike Model', fontsize=12, fontweight='bold')
-plt.title('Top 15 Most Volatile Bike Models by Cost Per Unit (CV%)', fontsize=14, fontweight='bold', pad=20)
-plt.axvline(x=50, color='red', linestyle='--', linewidth=2, label='High Volatility Threshold (50%)')
-plt.legend()
-plt.grid(axis='x', alpha=0.3)
-plt.tight_layout()
-plt.savefig('chart_1_top_volatile_models.png', dpi=300, bbox_inches='tight')
-plt.show()
-print("✓ Chart 1 saved: chart_1_top_volatile_models.png")
-
-# Chart 2: Volatility vs Total Warranty Cost Scatter
-plt.figure(figsize=(14, 8))
-scatter_data = volatility_df.copy()
-plt.scatter(scatter_data['WARRANTY_COST_sum'], scatter_data['COST_PER_UNIT_cv'],
-           s=scatter_data['VOLUME_sum']/10, alpha=0.6, c=scatter_data['COST_PER_UNIT_cv'], cmap='YlOrRd')
-plt.xlabel('Total Warranty Cost', fontsize=12, fontweight='bold')
-plt.ylabel('Cost Per Unit Volatility (CV%)', fontsize=12, fontweight='bold')
-plt.title('Warranty Cost vs Volatility (Bubble size = Volume)', fontsize=14, fontweight='bold', pad=20)
-plt.axhline(y=50, color='red', linestyle='--', linewidth=2, alpha=0.5, label='High Volatility Threshold')
-plt.colorbar(label='CV%')
-plt.legend()
-plt.grid(alpha=0.3)
-plt.tight_layout()
-plt.savefig('chart_2_cost_vs_volatility.png', dpi=300, bbox_inches='tight')
-plt.show()
-print("✓ Chart 2 saved: chart_2_cost_vs_volatility.png")
-
-# Chart 3: Cost Per Unit Distribution by Volatility Category
-plt.figure(figsize=(14, 8))
-df_with_category = df.merge(comprehensive_stats[['BIKE_GROUPED', 'volatility_category']], on='BIKE_GROUPED', how='left')
-sns.boxplot(data=df_with_category, x='volatility_category', y='COST_PER_UNIT', palette='Set2', showfliers=False)
-sns.stripplot(data=df_with_category, x='volatility_category', y='COST_PER_UNIT', color='black', alpha=0.3, size=2)
-plt.xlabel('Volatility Category', fontsize=12, fontweight='bold')
-plt.ylabel('Cost Per Unit', fontsize=12, fontweight='bold')
-plt.title('Cost Per Unit Distribution by Volatility Category', fontsize=14, fontweight='bold', pad=20)
-plt.grid(axis='y', alpha=0.3)
-plt.tight_layout()
-plt.savefig('chart_3_cost_distribution_by_volatility.png', dpi=300, bbox_inches='tight')
-plt.show()
-print("✓ Chart 3 saved: chart_3_cost_distribution_by_volatility.png")
-
-# Chart 4: Time Series - Cost Per Unit Trends for Top Volatile Models
-plt.figure(figsize=(16, 10))
-top_5_volatile = volatility_df.nlargest(5, 'COST_PER_UNIT_cv')['BIKE_GROUPED'].tolist()
-for i, bike in enumerate(top_5_volatile):
-    bike_data = df[df['BIKE_GROUPED'] == bike].copy()
-    bike_data = bike_data.sort_values('WARRANTY_MONTH')
-    plt.subplot(3, 2, i+1)
-    plt.plot(bike_data['WARRANTY_MONTH'], bike_data['COST_PER_UNIT'], marker='o', linewidth=2, markersize=4)
-    plt.fill_between(bike_data['WARRANTY_MONTH'], bike_data['COST_PER_UNIT'], alpha=0.3)
-    mean_cost = bike_data['COST_PER_UNIT'].mean()
-    plt.axhline(y=mean_cost, color='red', linestyle='--', alpha=0.7, label=f'Mean: {mean_cost:.2f}')
-    plt.title(f'{bike}', fontsize=11, fontweight='bold')
-    plt.xlabel('Warranty Month', fontsize=10)
-    plt.ylabel('Cost Per Unit', fontsize=10)
-    plt.legend(fontsize=8)
-    plt.grid(alpha=0.3)
-    plt.xticks(rotation=45)
-plt.suptitle('Cost Per Unit Trends - Top 5 Most Volatile Models', fontsize=14, fontweight='bold', y=1.00)
-plt.tight_layout()
-plt.savefig('chart_4_time_series_volatile_models.png', dpi=300, bbox_inches='tight')
-plt.show()
-print("✓ Chart 4 saved: chart_4_time_series_volatile_models.png")
-
-# Chart 5: Warranty Cost by Age Groups
-plt.figure(figsize=(14, 8))
-age_grouped = df.groupby('AGE').agg({'WARRANTY_COST': 'sum', 'VOLUME': 'sum', 'COST_PER_UNIT': 'mean'}).reset_index()
-fig, ax1 = plt.subplots(figsize=(14, 8))
-color1 = 'tab:blue'
-ax1.set_xlabel('Age (Months)', fontsize=12, fontweight='bold')
-ax1.set_ylabel('Total Warranty Cost', color=color1, fontsize=12, fontweight='bold')
-ax1.bar(age_grouped['AGE'], age_grouped['WARRANTY_COST'], color=color1, alpha=0.6, label='Total Warranty Cost')
-ax1.tick_params(axis='y', labelcolor=color1)
-ax1.grid(alpha=0.3)
-ax2 = ax1.twinx()
-color2 = 'tab:red'
-ax2.set_ylabel('Average Cost Per Unit', color=color2, fontsize=12, fontweight='bold')
-ax2.plot(age_grouped['AGE'], age_grouped['COST_PER_UNIT'], color=color2, marker='o', linewidth=2, markersize=6, label='Avg Cost Per Unit')
-ax2.tick_params(axis='y', labelcolor=color2)
-plt.title('Warranty Cost and Cost Per Unit by Age', fontsize=14, fontweight='bold', pad=20)
-fig.legend(loc='upper left', bbox_to_anchor=(0.1, 0.9))
-plt.tight_layout()
-plt.savefig('chart_5_cost_by_age.png', dpi=300, bbox_inches='tight')
-plt.show()
-print("✓ Chart 5 saved: chart_5_cost_by_age.png")
-
-# Chart 6: Heatmap - Average Cost Per Unit by Model and Age
-plt.figure(figsize=(16, 10))
-top_models = volatility_df.nlargest(10, 'COST_PER_UNIT_cv')['BIKE_GROUPED'].tolist()
-heatmap_data = df[df['BIKE_GROUPED'].isin(top_models)].pivot_table(values='COST_PER_UNIT', index='BIKE_GROUPED', columns='AGE', aggfunc='mean')
-sns.heatmap(heatmap_data, annot=True, fmt='.1f', cmap='YlOrRd', linewidths=0.5, cbar_kws={'label': 'Cost Per Unit'})
-plt.xlabel('Age (Months)', fontsize=12, fontweight='bold')
-plt.ylabel('Bike Model', fontsize=12, fontweight='bold')
-plt.title('Cost Per Unit Heatmap - Top 10 Volatile Models by Age', fontsize=14, fontweight='bold', pad=20)
-plt.tight_layout()
-plt.savefig('chart_6_heatmap_cost_by_age.png', dpi=300, bbox_inches='tight')
-plt.show()
-print("✓ Chart 6 saved: chart_6_heatmap_cost_by_age.png")
-
-# ============================================================================
-# 7. SUMMARY STATISTICS AND EXPORT
-# ============================================================================
-
-# Create summary report
-summary_report = {
-    'total_models': df['BIKE_GROUPED'].nunique(),
-    'total_warranty_months': df['WARRANTY_MONTH'].nunique(),
-    'total_volume': df['VOLUME'].sum(),
-    'total_warranty_cost': df['WARRANTY_COST'].sum(),
-    'avg_cost_per_unit': df['COST_PER_UNIT'].mean(),
-    'highly_volatile_models': len(volatility_df[volatility_df['COST_PER_UNIT_cv'] > 50]),
-    'medium_volatile_models': len(volatility_df[(volatility_df['COST_PER_UNIT_cv'] >= 25) & (volatility_df['COST_PER_UNIT_cv'] <= 50)]),
-    'low_volatile_models': len(volatility_df[volatility_df['COST_PER_UNIT_cv'] < 25])
-}
-
-summary_df = pd.DataFrame([summary_report]).T
-summary_df.columns = ['Value']
-summary_df.index.name = 'Metric'
-
-print("
-" + "="*80)
-print("EXECUTIVE SUMMARY")
-print("="*80)
-print(summary_df)
-
-# Export all results to Excel
-with pd.ExcelWriter('warranty_eda_analysis_results.xlsx') as writer:
-    comprehensive_stats.to_excel(writer, sheet_name='Comprehensive_Statistics', index=False)
-    volatility_df.to_excel(writer, sheet_name='Volatility_Metrics', index=False)
-    outlier_summary.to_excel(writer, sheet_name='Outlier_Analysis', index=False)
-    summary_df.to_excel(writer, sheet_name='Executive_Summary')
-    highly_volatile.to_excel(writer, sheet_name='High_Volatility_Models', index=False)
-    warranty_month_stats.to_excel(writer, sheet_name='Warranty_Month_Trends', index=False)
-    age_stats.to_excel(writer, sheet_name='Age_Trends', index=False)
-
-print("
-✓ All results exported to 'warranty_eda_analysis_results.xlsx'")
-
-# Export CSV files
-comprehensive_stats.to_csv('warranty_comprehensive_statistics.csv', index=False)
-print("✓ Statistics table exported to 'warranty_comprehensive_statistics.csv'")
-
-print("
-" + "="*80)
-print("EDA PIPELINE COMPLETED SUCCESSFULLY")
-print("="*80)
-print("
-Outputs Generated:")
-print("  • 6 PNG chart files")
-print("  • 1 Excel file with 7 sheets")
-print("  • 1 CSV summary file")
-print("
-Key Findings:")
-print(f"  • Total Models Analyzed: {summary_report['total_models']}")
-print(f"  • High Volatility Models (CV>50%): {summary_report['highly_volatile_models']}")
-print(f"  • Total Warranty Cost: {summary_report['total_warranty_cost']:,.2f}")
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-# ============================================================================
-# COMPARATIVE ANALYSIS: V1 PLUS, V1 PRO, VIDA V2 vs OTHER MODELS
-# Trendline Charts and Statistical Comparisons
+# COMPREHENSIVE COMPARATIVE ANALYSIS: OTHERS vs TARGET MODELS
+# V1 PLUS, V1 PRO, VIDA V2 vs Others (Aggregated Baseline)
+# Complete Pipeline in Single Code Block
 # ============================================================================
 
 import pandas as pd
@@ -414,514 +15,371 @@ warnings.filterwarnings('ignore')
 
 # Set visualization style
 sns.set_style("whitegrid")
-plt.rcParams['figure.figsize'] = (16, 10)
+plt.rcParams['figure.figsize'] = (18, 10)
 %matplotlib inline
 
 # ============================================================================
-# 1. DEFINE TARGET MODELS AND GROUPING
+# 1. DEFINE TARGET MODELS AND PREPARE DATA
 # ============================================================================
 
-# Target models for comparison
 target_models = ['V1 PLUS', 'V1 PRO', 'VIDA V2']
 
-# Create comparison groups
-df['model_group'] = df['BIKE_GROUPED'].apply(
-    lambda x: x if x in target_models else 'Others'
-)
-
 print("="*80)
-print("MODEL GROUPING SUMMARY")
+print("COMPARATIVE ANALYSIS: TARGET MODELS vs OTHERS (AGGREGATED)")
 print("="*80)
-print(df['model_group'].value_counts())
-print("
-Target Models Records:")
-for model in target_models:
-    count = len(df[df['BIKE_GROUPED'] == model])
-    print(f"  {model}: {count} records")
+print(f"
+Target Models: {', '.join(target_models)}")
+print(f"Baseline: All Other Models (Aggregated)")
+
+# Define color scheme
+colors = {
+    'V1 PLUS': '#2E86AB', 
+    'V1 PRO': '#A23B72', 
+    'VIDA V2': '#F18F01',
+    'Others (Aggregated)': '#555555'
+}
 
 # ============================================================================
-# 2. COMPARATIVE STATISTICS TABLE
+# 2. AGGREGATE OTHERS DATA
 # ============================================================================
 
-def create_comparative_stats(df, target_models):
-    """Generate comprehensive comparative statistics"""
-    
-    # Stats for target models
-    target_stats = []
-    for model in target_models:
-        model_data = df[df['BIKE_GROUPED'] == model]
-        stats_dict = {
-            'Model': model,
-            'Type': 'Target',
-            'Total_Records': len(model_data),
-            'Total_Warranty_Cost': model_data['WARRANTY_COST'].sum(),
-            'Avg_Cost_Per_Unit': model_data['COST_PER_UNIT'].mean(),
-            'Median_Cost_Per_Unit': model_data['COST_PER_UNIT'].median(),
-            'Std_Cost_Per_Unit': model_data['COST_PER_UNIT'].std(),
-            'CV_Cost_Per_Unit': (model_data['COST_PER_UNIT'].std() / model_data['COST_PER_UNIT'].mean()) * 100,
-            'Total_Volume': model_data['VOLUME'].sum(),
-            'Avg_Volume': model_data['VOLUME'].mean(),
-            'Min_Age': model_data['AGE'].min(),
-            'Max_Age': model_data['AGE'].max(),
-            'Warranty_Months': model_data['WARRANTY_MONTH'].nunique()
-        }
-        target_stats.append(stats_dict)
-    
-    # Stats for others combined
-    others_data = df[~df['BIKE_GROUPED'].isin(target_models)]
-    others_dict = {
-        'Model': 'All Others (Combined)',
-        'Type': 'Baseline',
-        'Total_Records': len(others_data),
-        'Total_Warranty_Cost': others_data['WARRANTY_COST'].sum(),
-        'Avg_Cost_Per_Unit': others_data['COST_PER_UNIT'].mean(),
-        'Median_Cost_Per_Unit': others_data['COST_PER_UNIT'].median(),
-        'Std_Cost_Per_Unit': others_data['COST_PER_UNIT'].std(),
-        'CV_Cost_Per_Unit': (others_data['COST_PER_UNIT'].std() / others_data['COST_PER_UNIT'].mean()) * 100,
-        'Total_Volume': others_data['VOLUME'].sum(),
-        'Avg_Volume': others_data['VOLUME'].mean(),
-        'Min_Age': others_data['AGE'].min(),
-        'Max_Age': others_data['AGE'].max(),
-        'Warranty_Months': others_data['WARRANTY_MONTH'].nunique()
-    }
-    target_stats.append(others_dict)
-    
-    comparison_df = pd.DataFrame(target_stats).round(2)
-    return comparison_df
+# Aggregate Others by WARRANTY_MONTH
+others_monthly = df[~df['BIKE_GROUPED'].isin(target_models)].groupby('WARRANTY_MONTH').agg({
+    'COST_PER_UNIT': 'mean',
+    'WARRANTY_COST': 'sum',
+    'VOLUME': 'sum'
+}).reset_index().sort_values('WARRANTY_MONTH')
 
-comparison_stats = create_comparative_stats(df, target_models)
+# Aggregate Others by AGE
+others_age = df[~df['BIKE_GROUPED'].isin(target_models)].groupby('AGE').agg({
+    'COST_PER_UNIT': 'mean',
+    'WARRANTY_COST': 'sum',
+    'VOLUME': 'sum'
+}).reset_index().sort_values('AGE')
 
-print("
-" + "="*80)
-print("COMPARATIVE STATISTICS: TARGET MODELS vs OTHERS")
-print("="*80)
-print(comparison_stats.to_string(index=False))
-
-# Export to CSV
-comparison_stats.to_csv('comparative_stats_v1_vida.csv', index=False)
-print("
-✓ Comparative statistics exported to 'comparative_stats_v1_vida.csv'")
+print(f"
+Others Aggregated Data:")
+print(f"  Total Records: {len(df[~df['BIKE_GROUPED'].isin(target_models)])}")
+print(f"  Unique Models: {df[~df['BIKE_GROUPED'].isin(target_models)]['BIKE_GROUPED'].nunique()}")
 
 # ============================================================================
-# 3. TREND ANALYSIS WITH LINEAR REGRESSION
+# 3. CHART 1: COST PER UNIT - ALL MODELS vs OTHERS ON SAME CHART
 # ============================================================================
 
-def calculate_trend_metrics(df, model_name, time_col='WARRANTY_MONTH'):
-    """Calculate trend line metrics for a model"""
-    model_data = df[df['BIKE_GROUPED'] == model_name].copy()
-    
-    # Convert WARRANTY_MONTH to numeric for regression
-    model_data['month_numeric'] = pd.to_datetime(model_data[time_col]).map(
-        lambda x: (x.year - pd.to_datetime(model_data[time_col]).min().year) * 12 + x.month
-    )
-    
-    # Aggregate by month
-    monthly_avg = model_data.groupby(time_col).agg({
-        'COST_PER_UNIT': 'mean',
-        'WARRANTY_COST': 'sum',
-        'VOLUME': 'sum'
-    }).reset_index()
-    
-    monthly_avg['month_numeric'] = range(len(monthly_avg))
-    
-    # Linear regression for trend
-    X = monthly_avg['month_numeric'].values.reshape(-1, 1)
-    y_cost = monthly_avg['COST_PER_UNIT'].values
-    y_warranty = monthly_avg['WARRANTY_COST'].values
-    
-    lr_cost = LinearRegression().fit(X, y_cost)
-    lr_warranty = LinearRegression().fit(X, y_warranty)
-    
-    return {
-        'model': model_name,
-        'cost_per_unit_slope': lr_cost.coef_[0],
-        'cost_per_unit_intercept': lr_cost.intercept_,
-        'cost_per_unit_r2': lr_cost.score(X, y_cost),
-        'warranty_cost_slope': lr_warranty.coef_[0],
-        'warranty_cost_intercept': lr_warranty.intercept_,
-        'warranty_cost_r2': lr_warranty.score(X, y_warranty),
-        'monthly_data': monthly_avg,
-        'trend_direction': 'Increasing' if lr_cost.coef_[0] > 0 else 'Decreasing'
-    }
+fig, axes = plt.subplots(2, 2, figsize=(20, 14))
+fig.suptitle('Cost Per Unit Comparison: Target Models vs Others (Aggregated Baseline)', 
+             fontsize=16, fontweight='bold', y=0.995)
 
-trend_metrics = {}
-for model in target_models:
-    trend_metrics[model] = calculate_trend_metrics(df, model)
-
-print("
-" + "="*80)
-print("TREND ANALYSIS - LINEAR REGRESSION METRICS")
-print("="*80)
-for model, metrics in trend_metrics.items():
-    print(f"
-{model}:")
-    print(f"  Cost Per Unit Trend: {metrics['trend_direction']}")
-    print(f"  Slope: {metrics['cost_per_unit_slope']:.4f}")
-    print(f"  R² Score: {metrics['cost_per_unit_r2']:.4f}")
-    print(f"  Warranty Cost Slope: {metrics['warranty_cost_slope']:.2f}")
-
-# ============================================================================
-# 4. VISUALIZATION - COMPARATIVE TRENDLINE CHARTS
-# ============================================================================
-
-# Chart 1: Cost Per Unit Trends - All Three Models with Trendlines
-fig, axes = plt.subplots(2, 2, figsize=(18, 12))
-
-colors = {'V1 PLUS': '#2E86AB', 'V1 PRO': '#A23B72', 'VIDA V2': '#F18F01'}
-
-# Subplot 1: All three models on same chart
+# Subplot 1: V1 PLUS vs Others
 ax = axes[0, 0]
-for model in target_models:
-    model_data = df[df['BIKE_GROUPED'] == model].groupby('WARRANTY_MONTH').agg({
-        'COST_PER_UNIT': 'mean'
-    }).reset_index().sort_values('WARRANTY_MONTH')
-    
-    ax.plot(model_data['WARRANTY_MONTH'], model_data['COST_PER_UNIT'], 
-            marker='o', linewidth=2.5, markersize=6, label=model, 
-            color=colors[model], alpha=0.8)
-    
-    # Add trendline
-    x_numeric = np.arange(len(model_data))
-    z = np.polyfit(x_numeric, model_data['COST_PER_UNIT'], 1)
-    p = np.poly1d(z)
-    ax.plot(model_data['WARRANTY_MONTH'], p(x_numeric), 
-            linestyle='--', linewidth=2, color=colors[model], alpha=0.5)
-
+model_data = df[df['BIKE_GROUPED'] == 'V1 PLUS'].groupby('WARRANTY_MONTH')['COST_PER_UNIT'].mean().reset_index().sort_values('WARRANTY_MONTH')
+ax.plot(model_data['WARRANTY_MONTH'], model_data['COST_PER_UNIT'], 
+        marker='o', linewidth=3.5, markersize=8, label='V1 PLUS', color=colors['V1 PLUS'], alpha=0.85, zorder=3)
+ax.plot(others_monthly['WARRANTY_MONTH'], others_monthly['COST_PER_UNIT'], 
+        marker='s', linewidth=3.5, markersize=8, label='Others (Aggregated)', 
+        color=colors['Others (Aggregated)'], alpha=0.85, linestyle='--', zorder=2)
+ax.fill_between(model_data['WARRANTY_MONTH'], model_data['COST_PER_UNIT'], alpha=0.15, color=colors['V1 PLUS'])
+ax.fill_between(others_monthly['WARRANTY_MONTH'], others_monthly['COST_PER_UNIT'], alpha=0.15, color=colors['Others (Aggregated)'])
 ax.set_xlabel('Warranty Month', fontsize=11, fontweight='bold')
 ax.set_ylabel('Average Cost Per Unit', fontsize=11, fontweight='bold')
-ax.set_title('Cost Per Unit Trends - V1 PLUS vs V1 PRO vs VIDA V2', 
-             fontsize=12, fontweight='bold')
-ax.legend(loc='best', fontsize=10)
-ax.grid(alpha=0.3)
+ax.set_title('V1 PLUS vs Others', fontsize=13, fontweight='bold', pad=10)
+ax.legend(loc='best', fontsize=10, framealpha=0.9)
+ax.grid(alpha=0.3, linestyle=':', linewidth=1)
 ax.tick_params(axis='x', rotation=45)
 
-# Subplot 2: Warranty Cost Trends
+# Subplot 2: V1 PRO vs Others
 ax = axes[0, 1]
-for model in target_models:
-    model_data = df[df['BIKE_GROUPED'] == model].groupby('WARRANTY_MONTH').agg({
-        'WARRANTY_COST': 'sum'
-    }).reset_index().sort_values('WARRANTY_MONTH')
-    
-    ax.plot(model_data['WARRANTY_MONTH'], model_data['WARRANTY_COST'], 
-            marker='s', linewidth=2.5, markersize=6, label=model, 
-            color=colors[model], alpha=0.8)
-    
-    # Add trendline
-    x_numeric = np.arange(len(model_data))
-    z = np.polyfit(x_numeric, model_data['WARRANTY_COST'], 1)
-    p = np.poly1d(z)
-    ax.plot(model_data['WARRANTY_MONTH'], p(x_numeric), 
-            linestyle='--', linewidth=2, color=colors[model], alpha=0.5)
-
+model_data = df[df['BIKE_GROUPED'] == 'V1 PRO'].groupby('WARRANTY_MONTH')['COST_PER_UNIT'].mean().reset_index().sort_values('WARRANTY_MONTH')
+ax.plot(model_data['WARRANTY_MONTH'], model_data['COST_PER_UNIT'], 
+        marker='o', linewidth=3.5, markersize=8, label='V1 PRO', color=colors['V1 PRO'], alpha=0.85, zorder=3)
+ax.plot(others_monthly['WARRANTY_MONTH'], others_monthly['COST_PER_UNIT'], 
+        marker='s', linewidth=3.5, markersize=8, label='Others (Aggregated)', 
+        color=colors['Others (Aggregated)'], alpha=0.85, linestyle='--', zorder=2)
+ax.fill_between(model_data['WARRANTY_MONTH'], model_data['COST_PER_UNIT'], alpha=0.15, color=colors['V1 PRO'])
+ax.fill_between(others_monthly['WARRANTY_MONTH'], others_monthly['COST_PER_UNIT'], alpha=0.15, color=colors['Others (Aggregated)'])
 ax.set_xlabel('Warranty Month', fontsize=11, fontweight='bold')
-ax.set_ylabel('Total Warranty Cost', fontsize=11, fontweight='bold')
-ax.set_title('Total Warranty Cost Trends', fontsize=12, fontweight='bold')
-ax.legend(loc='best', fontsize=10)
-ax.grid(alpha=0.3)
+ax.set_ylabel('Average Cost Per Unit', fontsize=11, fontweight='bold')
+ax.set_title('V1 PRO vs Others', fontsize=13, fontweight='bold', pad=10)
+ax.legend(loc='best', fontsize=10, framealpha=0.9)
+ax.grid(alpha=0.3, linestyle=':', linewidth=1)
 ax.tick_params(axis='x', rotation=45)
 
-# Subplot 3: Volume Trends
+# Subplot 3: VIDA V2 vs Others
 ax = axes[1, 0]
-for model in target_models:
-    model_data = df[df['BIKE_GROUPED'] == model].groupby('WARRANTY_MONTH').agg({
-        'VOLUME': 'sum'
-    }).reset_index().sort_values('WARRANTY_MONTH')
-    
-    ax.plot(model_data['WARRANTY_MONTH'], model_data['VOLUME'], 
-            marker='^', linewidth=2.5, markersize=6, label=model, 
-            color=colors[model], alpha=0.8)
-    
-    # Add trendline
-    x_numeric = np.arange(len(model_data))
-    z = np.polyfit(x_numeric, model_data['VOLUME'], 1)
-    p = np.poly1d(z)
-    ax.plot(model_data['WARRANTY_MONTH'], p(x_numeric), 
-            linestyle='--', linewidth=2, color=colors[model], alpha=0.5)
-
+model_data = df[df['BIKE_GROUPED'] == 'VIDA V2'].groupby('WARRANTY_MONTH')['COST_PER_UNIT'].mean().reset_index().sort_values('WARRANTY_MONTH')
+ax.plot(model_data['WARRANTY_MONTH'], model_data['COST_PER_UNIT'], 
+        marker='o', linewidth=3.5, markersize=8, label='VIDA V2', color=colors['VIDA V2'], alpha=0.85, zorder=3)
+ax.plot(others_monthly['WARRANTY_MONTH'], others_monthly['COST_PER_UNIT'], 
+        marker='s', linewidth=3.5, markersize=8, label='Others (Aggregated)', 
+        color=colors['Others (Aggregated)'], alpha=0.85, linestyle='--', zorder=2)
+ax.fill_between(model_data['WARRANTY_MONTH'], model_data['COST_PER_UNIT'], alpha=0.15, color=colors['VIDA V2'])
+ax.fill_between(others_monthly['WARRANTY_MONTH'], others_monthly['COST_PER_UNIT'], alpha=0.15, color=colors['Others (Aggregated)'])
 ax.set_xlabel('Warranty Month', fontsize=11, fontweight='bold')
-ax.set_ylabel('Total Volume', fontsize=11, fontweight='bold')
-ax.set_title('Volume Trends', fontsize=12, fontweight='bold')
-ax.legend(loc='best', fontsize=10)
-ax.grid(alpha=0.3)
+ax.set_ylabel('Average Cost Per Unit', fontsize=11, fontweight='bold')
+ax.set_title('VIDA V2 vs Others', fontsize=13, fontweight='bold', pad=10)
+ax.legend(loc='best', fontsize=10, framealpha=0.9)
+ax.grid(alpha=0.3, linestyle=':', linewidth=1)
 ax.tick_params(axis='x', rotation=45)
 
-# Subplot 4: Cost Per Unit by Age
+# Subplot 4: All Target Models + Others on Same Chart
 ax = axes[1, 1]
 for model in target_models:
-    model_data = df[df['BIKE_GROUPED'] == model].groupby('AGE').agg({
-        'COST_PER_UNIT': 'mean'
-    }).reset_index().sort_values('AGE')
+    model_data = df[df['BIKE_GROUPED'] == model].groupby('WARRANTY_MONTH')['COST_PER_UNIT'].mean().reset_index().sort_values('WARRANTY_MONTH')
+    ax.plot(model_data['WARRANTY_MONTH'], model_data['COST_PER_UNIT'], 
+            marker='o', linewidth=2.5, markersize=6, label=model, color=colors[model], alpha=0.75)
+ax.plot(others_monthly['WARRANTY_MONTH'], others_monthly['COST_PER_UNIT'], 
+        marker='s', linewidth=4, markersize=9, label='Others (Aggregated)', 
+        color=colors['Others (Aggregated)'], alpha=0.95, linestyle='--', zorder=4)
+ax.set_xlabel('Warranty Month', fontsize=11, fontweight='bold')
+ax.set_ylabel('Average Cost Per Unit', fontsize=11, fontweight='bold')
+ax.set_title('All Models - Comparative View', fontsize=13, fontweight='bold', pad=10)
+ax.legend(loc='best', fontsize=10, framealpha=0.9)
+ax.grid(alpha=0.3, linestyle=':', linewidth=1)
+ax.tick_params(axis='x', rotation=45)
+
+plt.tight_layout()
+plt.savefig('comparison_cost_per_unit_vs_others.png', dpi=300, bbox_inches='tight')
+plt.show()
+print("
+✓ Chart 1 saved: comparison_cost_per_unit_vs_others.png")
+
+# ============================================================================
+# 4. CHART 2: WARRANTY COST - TARGETS vs OTHERS
+# ============================================================================
+
+fig, axes = plt.subplots(2, 2, figsize=(20, 14))
+fig.suptitle('Total Warranty Cost Comparison: Target Models vs Others (Aggregated Baseline)', 
+             fontsize=16, fontweight='bold', y=0.995)
+
+for idx, model in enumerate(target_models):
+    row = idx // 2
+    col = idx % 2
+    ax = axes[row, col]
     
+    model_data = df[df['BIKE_GROUPED'] == model].groupby('WARRANTY_MONTH')['WARRANTY_COST'].sum().reset_index().sort_values('WARRANTY_MONTH')
+    ax.plot(model_data['WARRANTY_MONTH'], model_data['WARRANTY_COST'], 
+            marker='o', linewidth=3.5, markersize=8, label=model, color=colors[model], alpha=0.85, zorder=3)
+    ax.plot(others_monthly['WARRANTY_MONTH'], others_monthly['WARRANTY_COST'], 
+            marker='s', linewidth=3.5, markersize=8, label='Others (Aggregated)', 
+            color=colors['Others (Aggregated)'], alpha=0.85, linestyle='--', zorder=2)
+    ax.fill_between(model_data['WARRANTY_MONTH'], model_data['WARRANTY_COST'], alpha=0.15, color=colors[model])
+    ax.fill_between(others_monthly['WARRANTY_MONTH'], others_monthly['WARRANTY_COST'], alpha=0.15, color=colors['Others (Aggregated)'])
+    ax.set_xlabel('Warranty Month', fontsize=11, fontweight='bold')
+    ax.set_ylabel('Total Warranty Cost', fontsize=11, fontweight='bold')
+    ax.set_title(f'{model} vs Others', fontsize=13, fontweight='bold', pad=10)
+    ax.legend(loc='best', fontsize=10, framealpha=0.9)
+    ax.grid(alpha=0.3, linestyle=':', linewidth=1)
+    ax.tick_params(axis='x', rotation=45)
+
+# Subplot 4: Combined View
+ax = axes[1, 1]
+for model in target_models:
+    model_data = df[df['BIKE_GROUPED'] == model].groupby('WARRANTY_MONTH')['WARRANTY_COST'].sum().reset_index().sort_values('WARRANTY_MONTH')
+    ax.plot(model_data['WARRANTY_MONTH'], model_data['WARRANTY_COST'], 
+            marker='o', linewidth=2.5, markersize=6, label=model, color=colors[model], alpha=0.75)
+ax.plot(others_monthly['WARRANTY_MONTH'], others_monthly['WARRANTY_COST'], 
+        marker='s', linewidth=4, markersize=9, label='Others (Aggregated)', 
+        color=colors['Others (Aggregated)'], alpha=0.95, linestyle='--', zorder=4)
+ax.set_xlabel('Warranty Month', fontsize=11, fontweight='bold')
+ax.set_ylabel('Total Warranty Cost', fontsize=11, fontweight='bold')
+ax.set_title('All Models - Comparative View', fontsize=13, fontweight='bold', pad=10)
+ax.legend(loc='best', fontsize=10, framealpha=0.9)
+ax.grid(alpha=0.3, linestyle=':', linewidth=1)
+ax.tick_params(axis='x', rotation=45)
+
+plt.tight_layout()
+plt.savefig('comparison_warranty_cost_vs_others.png', dpi=300, bbox_inches='tight')
+plt.show()
+print("✓ Chart 2 saved: comparison_warranty_cost_vs_others.png")
+
+# ============================================================================
+# 5. CHART 3: COST BY AGE - TARGETS vs OTHERS
+# ============================================================================
+
+fig, axes = plt.subplots(2, 2, figsize=(20, 14))
+fig.suptitle('Cost Per Unit by Age: Target Models vs Others (Aggregated Baseline)', 
+             fontsize=16, fontweight='bold', y=0.995)
+
+for idx, model in enumerate(target_models):
+    row = idx // 2
+    col = idx % 2
+    ax = axes[row, col]
+    
+    model_data = df[df['BIKE_GROUPED'] == model].groupby('AGE')['COST_PER_UNIT'].mean().reset_index().sort_values('AGE')
     ax.plot(model_data['AGE'], model_data['COST_PER_UNIT'], 
-            marker='D', linewidth=2.5, markersize=6, label=model, 
-            color=colors[model], alpha=0.8)
+            marker='o', linewidth=3.5, markersize=8, label=model, color=colors[model], alpha=0.85, zorder=3)
+    ax.plot(others_age['AGE'], others_age['COST_PER_UNIT'], 
+            marker='s', linewidth=3.5, markersize=8, label='Others (Aggregated)', 
+            color=colors['Others (Aggregated)'], alpha=0.85, linestyle='--', zorder=2)
     
-    # Add trendline
+    # Add trendlines
     x_numeric = np.arange(len(model_data))
     z = np.polyfit(x_numeric, model_data['COST_PER_UNIT'], 1)
     p = np.poly1d(z)
-    ax.plot(model_data['AGE'], p(x_numeric), 
-            linestyle='--', linewidth=2, color=colors[model], alpha=0.5)
+    ax.plot(model_data['AGE'], p(x_numeric), linestyle=':', linewidth=2, color=colors[model], alpha=0.5)
+    
+    x_numeric_others = np.arange(len(others_age))
+    z_others = np.polyfit(x_numeric_others, others_age['COST_PER_UNIT'], 1)
+    p_others = np.poly1d(z_others)
+    ax.plot(others_age['AGE'], p_others(x_numeric_others), linestyle=':', linewidth=2, color=colors['Others (Aggregated)'], alpha=0.5)
+    
+    ax.set_xlabel('Age (Months)', fontsize=11, fontweight='bold')
+    ax.set_ylabel('Average Cost Per Unit', fontsize=11, fontweight='bold')
+    ax.set_title(f'{model} vs Others', fontsize=13, fontweight='bold', pad=10)
+    ax.legend(loc='best', fontsize=10, framealpha=0.9)
+    ax.grid(alpha=0.3, linestyle=':', linewidth=1)
 
+# Subplot 4: Combined View
+ax = axes[1, 1]
+for model in target_models:
+    model_data = df[df['BIKE_GROUPED'] == model].groupby('AGE')['COST_PER_UNIT'].mean().reset_index().sort_values('AGE')
+    ax.plot(model_data['AGE'], model_data['COST_PER_UNIT'], 
+            marker='o', linewidth=2.5, markersize=6, label=model, color=colors[model], alpha=0.75)
+ax.plot(others_age['AGE'], others_age['COST_PER_UNIT'], 
+        marker='s', linewidth=4, markersize=9, label='Others (Aggregated)', 
+        color=colors['Others (Aggregated)'], alpha=0.95, linestyle='--', zorder=4)
 ax.set_xlabel('Age (Months)', fontsize=11, fontweight='bold')
 ax.set_ylabel('Average Cost Per Unit', fontsize=11, fontweight='bold')
-ax.set_title('Cost Per Unit by Age', fontsize=12, fontweight='bold')
-ax.legend(loc='best', fontsize=10)
-ax.grid(alpha=0.3)
+ax.set_title('All Models - Comparative View', fontsize=13, fontweight='bold', pad=10)
+ax.legend(loc='best', fontsize=10, framealpha=0.9)
+ax.grid(alpha=0.3, linestyle=':', linewidth=1)
 
 plt.tight_layout()
-plt.savefig('comparative_trends_v1_vida.png', dpi=300, bbox_inches='tight')
+plt.savefig('comparison_cost_by_age_vs_others.png', dpi=300, bbox_inches='tight')
 plt.show()
-print("
-✓ Chart saved: comparative_trends_v1_vida.png")
+print("✓ Chart 3 saved: comparison_cost_by_age_vs_others.png")
 
 # ============================================================================
-# 5. INDIVIDUAL MODEL DETAILED TRENDLINES
+# 6. CHART 4: GROUPED BAR CHART - KEY METRICS COMPARISON
 # ============================================================================
 
 fig, axes = plt.subplots(1, 3, figsize=(20, 6))
+fig.suptitle('Key Metrics Comparison: Target Models vs Others', fontsize=16, fontweight='bold', y=1.02)
+
+# Prepare data for bar charts
+models_list = target_models + ['Others (Aggregated)']
+avg_cost_list = []
+cv_list = []
+total_cost_list = []
+
+for model in target_models:
+    model_df = df[df['BIKE_GROUPED'] == model]
+    avg_cost_list.append(model_df['COST_PER_UNIT'].mean())
+    cv_list.append((model_df['COST_PER_UNIT'].std() / model_df['COST_PER_UNIT'].mean()) * 100)
+    total_cost_list.append(model_df['WARRANTY_COST'].sum())
+
+others_df = df[~df['BIKE_GROUPED'].isin(target_models)]
+avg_cost_list.append(others_df['COST_PER_UNIT'].mean())
+cv_list.append((others_df['COST_PER_UNIT'].std() / others_df['COST_PER_UNIT'].mean()) * 100)
+total_cost_list.append(others_df['WARRANTY_COST'].sum())
+
+bar_colors = [colors[m] for m in models_list]
+
+# Chart 1: Average Cost Per Unit
+ax = axes[0]
+x_pos = np.arange(len(models_list))
+bars = ax.bar(x_pos, avg_cost_list, color=bar_colors, alpha=0.75, edgecolor='black', linewidth=1.5)
+ax.set_xticks(x_pos)
+ax.set_xticklabels(models_list, rotation=20, ha='right', fontsize=10)
+ax.set_ylabel('Average Cost Per Unit', fontsize=11, fontweight='bold')
+ax.set_title('Average Cost Per Unit', fontsize=12, fontweight='bold', pad=10)
+ax.grid(axis='y', alpha=0.3, linestyle=':', linewidth=1)
+for i, (bar, val) in enumerate(zip(bars, avg_cost_list)):
+    ax.text(bar.get_x() + bar.get_width()/2, bar.get_height() + max(avg_cost_list)*0.01, 
+            f'{val:.2f}', ha='center', va='bottom', fontsize=9, fontweight='bold')
+
+# Chart 2: Coefficient of Variation (Volatility)
+ax = axes[1]
+bars = ax.bar(x_pos, cv_list, color=bar_colors, alpha=0.75, edgecolor='black', linewidth=1.5)
+ax.set_xticks(x_pos)
+ax.set_xticklabels(models_list, rotation=20, ha='right', fontsize=10)
+ax.set_ylabel('Coefficient of Variation (%)', fontsize=11, fontweight='bold')
+ax.set_title('Volatility (CV%)', fontsize=12, fontweight='bold', pad=10)
+ax.axhline(y=50, color='red', linestyle='--', linewidth=2, alpha=0.7, label='High Volatility Threshold')
+ax.legend(fontsize=9)
+ax.grid(axis='y', alpha=0.3, linestyle=':', linewidth=1)
+for i, (bar, val) in enumerate(zip(bars, cv_list)):
+    ax.text(bar.get_x() + bar.get_width()/2, bar.get_height() + max(cv_list)*0.01, 
+            f'{val:.1f}%', ha='center', va='bottom', fontsize=9, fontweight='bold')
+
+# Chart 3: Total Warranty Cost
+ax = axes[2]
+bars = ax.bar(x_pos, total_cost_list, color=bar_colors, alpha=0.75, edgecolor='black', linewidth=1.5)
+ax.set_xticks(x_pos)
+ax.set_xticklabels(models_list, rotation=20, ha='right', fontsize=10)
+ax.set_ylabel('Total Warranty Cost', fontsize=11, fontweight='bold')
+ax.set_title('Total Warranty Cost', fontsize=12, fontweight='bold', pad=10)
+ax.grid(axis='y', alpha=0.3, linestyle=':', linewidth=1)
+for i, (bar, val) in enumerate(zip(bars, total_cost_list)):
+    ax.text(bar.get_x() + bar.get_width()/2, bar.get_height() + max(total_cost_list)*0.01, 
+            f'{val:,.0f}', ha='center', va='bottom', fontsize=8, fontweight='bold')
+
+plt.tight_layout()
+plt.savefig('comparison_bar_charts_metrics.png', dpi=300, bbox_inches='tight')
+plt.show()
+print("✓ Chart 4 saved: comparison_bar_charts_metrics.png")
+
+# ============================================================================
+# 7. CHART 5: VOLUME COMPARISON - TARGETS vs OTHERS
+# ============================================================================
+
+fig, axes = plt.subplots(2, 2, figsize=(20, 14))
+fig.suptitle('Volume Comparison: Target Models vs Others (Aggregated Baseline)', 
+             fontsize=16, fontweight='bold', y=0.995)
 
 for idx, model in enumerate(target_models):
-    ax = axes[idx]
+    row = idx // 2
+    col = idx % 2
+    ax = axes[row, col]
     
-    # Get model data
-    model_data = df[df['BIKE_GROUPED'] == model].copy()
-    monthly_data = model_data.groupby('WARRANTY_MONTH').agg({
-        'COST_PER_UNIT': 'mean',
-        'WARRANTY_COST': 'sum',
-        'VOLUME': 'sum'
-    }).reset_index().sort_values('WARRANTY_MONTH')
-    
-    # Plot actual data
-    ax.plot(monthly_data['WARRANTY_MONTH'], monthly_data['COST_PER_UNIT'], 
-            marker='o', linewidth=3, markersize=8, label='Actual Cost/Unit', 
-            color=colors[model], alpha=0.7)
-    
-    # Add trendline with equation
-    x_numeric = np.arange(len(monthly_data))
-    z = np.polyfit(x_numeric, monthly_data['COST_PER_UNIT'], 1)
-    p = np.poly1d(z)
-    trend_line = p(x_numeric)
-    
-    ax.plot(monthly_data['WARRANTY_MONTH'], trend_line, 
-            linestyle='--', linewidth=2.5, color='red', 
-            label=f'Trend: y={z[0]:.2f}x+{z[1]:.2f}', alpha=0.8)
-    
-    # Fill area between actual and trend
-    ax.fill_between(monthly_data['WARRANTY_MONTH'], 
-                     monthly_data['COST_PER_UNIT'], trend_line, 
-                     alpha=0.2, color=colors[model])
-    
-    # Calculate and display statistics
-    mean_cost = monthly_data['COST_PER_UNIT'].mean()
-    ax.axhline(y=mean_cost, color='green', linestyle=':', linewidth=2, 
-               label=f'Mean: {mean_cost:.2f}', alpha=0.7)
-    
+    model_data = df[df['BIKE_GROUPED'] == model].groupby('WARRANTY_MONTH')['VOLUME'].sum().reset_index().sort_values('WARRANTY_MONTH')
+    ax.plot(model_data['WARRANTY_MONTH'], model_data['VOLUME'], 
+            marker='o', linewidth=3.5, markersize=8, label=model, color=colors[model], alpha=0.85, zorder=3)
+    ax.plot(others_monthly['WARRANTY_MONTH'], others_monthly['VOLUME'], 
+            marker='s', linewidth=3.5, markersize=8, label='Others (Aggregated)', 
+            color=colors['Others (Aggregated)'], alpha=0.85, linestyle='--', zorder=2)
+    ax.fill_between(model_data['WARRANTY_MONTH'], model_data['VOLUME'], alpha=0.15, color=colors[model])
+    ax.fill_between(others_monthly['WARRANTY_MONTH'], others_monthly['VOLUME'], alpha=0.15, color=colors['Others (Aggregated)'])
     ax.set_xlabel('Warranty Month', fontsize=11, fontweight='bold')
-    ax.set_ylabel('Cost Per Unit', fontsize=11, fontweight='bold')
-    ax.set_title(f'{model} - Detailed Trendline Analysis', 
-                 fontsize=12, fontweight='bold', color=colors[model])
-    ax.legend(loc='best', fontsize=9)
-    ax.grid(alpha=0.3)
+    ax.set_ylabel('Total Volume', fontsize=11, fontweight='bold')
+    ax.set_title(f'{model} vs Others', fontsize=13, fontweight='bold', pad=10)
+    ax.legend(loc='best', fontsize=10, framealpha=0.9)
+    ax.grid(alpha=0.3, linestyle=':', linewidth=1)
     ax.tick_params(axis='x', rotation=45)
 
+# Subplot 4: Combined View
+ax = axes[1, 1]
+for model in target_models:
+    model_data = df[df['BIKE_GROUPED'] == model].groupby('WARRANTY_MONTH')['VOLUME'].sum().reset_index().sort_values('WARRANTY_MONTH')
+    ax.plot(model_data['WARRANTY_MONTH'], model_data['VOLUME'], 
+            marker='o', linewidth=2.5, markersize=6, label=model, color=colors[model], alpha=0.75)
+ax.plot(others_monthly['WARRANTY_MONTH'], others_monthly['VOLUME'], 
+        marker='s', linewidth=4, markersize=9, label='Others (Aggregated)', 
+        color=colors['Others (Aggregated)'], alpha=0.95, linestyle='--', zorder=4)
+ax.set_xlabel('Warranty Month', fontsize=11, fontweight='bold')
+ax.set_ylabel('Total Volume', fontsize=11, fontweight='bold')
+ax.set_title('All Models - Comparative View', fontsize=13, fontweight='bold', pad=10)
+ax.legend(loc='best', fontsize=10, framealpha=0.9)
+ax.grid(alpha=0.3, linestyle=':', linewidth=1)
+ax.tick_params(axis='x', rotation=45)
+
 plt.tight_layout()
-plt.savefig('individual_trendlines_v1_vida.png', dpi=300, bbox_inches='tight')
+plt.savefig('comparison_volume_vs_others.png', dpi=300, bbox_inches='tight')
 plt.show()
-print("✓ Chart saved: individual_trendlines_v1_vida.png")
+print("✓ Chart 5 saved: comparison_volume_vs_others.png")
 
 # ============================================================================
-# 6. TARGET MODELS vs OTHERS - BOX PLOT COMPARISON
+# 8. COMPARATIVE STATISTICS TABLE
 # ============================================================================
 
-fig, axes = plt.subplots(1, 2, figsize=(16, 6))
-
-# Box plot for Cost Per Unit
-ax = axes[0]
 comparison_data = []
-labels = []
+
 for model in target_models:
-    comparison_data.append(df[df['BIKE_GROUPED'] == model]['COST_PER_UNIT'].values)
-    labels.append(model)
-comparison_data.append(df[~df['BIKE_GROUPED'].isin(target_models)]['COST_PER_UNIT'].values)
-labels.append('All Others')
-
-bp = ax.boxplot(comparison_data, labels=labels, patch_artist=True, 
-                showmeans=True, meanline=True)
-
-# Color the boxes
-box_colors = [colors.get(label, '#808080') for label in labels]
-for patch, color in zip(bp['boxes'], box_colors):
-    patch.set_facecolor(color)
-    patch.set_alpha(0.6)
-
-ax.set_ylabel('Cost Per Unit', fontsize=11, fontweight='bold')
-ax.set_title('Cost Per Unit Distribution - Target Models vs Others', 
-             fontsize=12, fontweight='bold')
-ax.grid(axis='y', alpha=0.3)
-ax.tick_params(axis='x', rotation=15)
-
-# Box plot for Warranty Cost
-ax = axes[1]
-comparison_data = []
-for model in target_models:
-    comparison_data.append(df[df['BIKE_GROUPED'] == model]['WARRANTY_COST'].values)
-comparison_data.append(df[~df['BIKE_GROUPED'].isin(target_models)]['WARRANTY_COST'].values)
-
-bp = ax.boxplot(comparison_data, labels=labels, patch_artist=True, 
-                showmeans=True, meanline=True)
-
-for patch, color in zip(bp['boxes'], box_colors):
-    patch.set_facecolor(color)
-    patch.set_alpha(0.6)
-
-ax.set_ylabel('Warranty Cost', fontsize=11, fontweight='bold')
-ax.set_title('Warranty Cost Distribution - Target Models vs Others', 
-             fontsize=12, fontweight='bold')
-ax.grid(axis='y', alpha=0.3)
-ax.tick_params(axis='x', rotation=15)
-
-plt.tight_layout()
-plt.savefig('boxplot_comparison_v1_vida.png', dpi=300, bbox_inches='tight')
-plt.show()
-print("✓ Chart saved: boxplot_comparison_v1_vida.png")
-
-# ============================================================================
-# 7. DUAL-AXIS COMPARISON CHART
-# ============================================================================
-
-fig, axes = plt.subplots(3, 1, figsize=(16, 14))
-
-for idx, model in enumerate(target_models):
-    ax1 = axes[idx]
-    
-    model_data = df[df['BIKE_GROUPED'] == model].groupby('WARRANTY_MONTH').agg({
-        'COST_PER_UNIT': 'mean',
-        'VOLUME': 'sum'
-    }).reset_index().sort_values('WARRANTY_MONTH')
-    
-    # Primary axis - Cost Per Unit
-    color1 = colors[model]
-    ax1.plot(model_data['WARRANTY_MONTH'], model_data['COST_PER_UNIT'], 
-             marker='o', linewidth=3, markersize=7, color=color1, 
-             label='Cost Per Unit')
-    ax1.fill_between(model_data['WARRANTY_MONTH'], model_data['COST_PER_UNIT'], 
-                      alpha=0.2, color=color1)
-    ax1.set_xlabel('Warranty Month', fontsize=11, fontweight='bold')
-    ax1.set_ylabel('Cost Per Unit', fontsize=11, fontweight='bold', color=color1)
-    ax1.tick_params(axis='y', labelcolor=color1)
-    ax1.tick_params(axis='x', rotation=45)
-    ax1.grid(alpha=0.3)
-    
-    # Secondary axis - Volume
-    ax2 = ax1.twinx()
-    color2 = '#555555'
-    ax2.bar(model_data['WARRANTY_MONTH'], model_data['VOLUME'], 
-            alpha=0.4, color=color2, label='Volume', width=20)
-    ax2.set_ylabel('Volume', fontsize=11, fontweight='bold', color=color2)
-    ax2.tick_params(axis='y', labelcolor=color2)
-    
-    # Title and legends
-    ax1.set_title(f'{model} - Cost Per Unit vs Volume Over Time', 
-                  fontsize=12, fontweight='bold')
-    ax1.legend(loc='upper left', fontsize=9)
-    ax2.legend(loc='upper right', fontsize=9)
-
-plt.tight_layout()
-plt.savefig('dual_axis_trends_v1_vida.png', dpi=300, bbox_inches='tight')
-plt.show()
-print("✓ Chart saved: dual_axis_trends_v1_vida.png")
-
-# ============================================================================
-# 8. STATISTICAL COMPARISON - ANOVA TEST
-# ============================================================================
-
-print("
-" + "="*80)
-print("STATISTICAL SIGNIFICANCE TEST (ANOVA)")
-print("="*80)
-
-# Prepare data for ANOVA
-groups_data = []
-for model in target_models:
-    groups_data.append(df[df['BIKE_GROUPED'] == model]['COST_PER_UNIT'].values)
-groups_data.append(df[~df['BIKE_GROUPED'].isin(target_models)]['COST_PER_UNIT'].values)
-
-# Perform ANOVA
-f_stat, p_value = stats.f_oneway(*groups_data)
-
-print(f"
-ANOVA Test - Cost Per Unit Comparison")
-print(f"  F-statistic: {f_stat:.4f}")
-print(f"  P-value: {p_value:.6f}")
-print(f"  Result: {'Statistically Significant' if p_value < 0.05 else 'Not Significant'} (α=0.05)")
-
-# Pairwise t-tests
-print("
-" + "="*80)
-print("PAIRWISE T-TESTS (Cost Per Unit)")
-print("="*80)
-
-comparison_pairs = [
-    ('V1 PLUS', 'V1 PRO'),
-    ('V1 PLUS', 'VIDA V2'),
-    ('V1 PRO', 'VIDA V2'),
-    ('V1 PLUS', 'All Others'),
-    ('V1 PRO', 'All Others'),
-    ('VIDA V2', 'All Others')
-]
-
-pairwise_results = []
-for model1, model2 in comparison_pairs:
-    if model1 == 'All Others':
-        data1 = df[~df['BIKE_GROUPED'].isin(target_models)]['COST_PER_UNIT'].values
-    else:
-        data1 = df[df['BIKE_GROUPED'] == model1]['COST_PER_UNIT'].values
-    
-    if model2 == 'All Others':
-        data2 = df[~df['BIKE_GROUPED'].isin(target_models)]['COST_PER_UNIT'].values
-    else:
-        data2 = df[df['BIKE_GROUPED'] == model2]['COST_PER_UNIT'].values
-    
-    t_stat, p_val = stats.ttest_ind(data1, data2)
-    
-    pairwise_results.append({
-        'Comparison': f'{model1} vs {model2}',
-        'T-Statistic': round(t_stat, 4),
-        'P-Value': round(p_val, 6),
-        'Significant': 'Yes' if p_val < 0.05 else 'No'
-    })
-
-pairwise_df = pd.DataFrame(pairwise_results)
-print(pairwise_df.to_string(index=False))
-
-# ============================================================================
-# 9. EXPORT COMPREHENSIVE RESULTS
-# ============================================================================
-
-with pd.ExcelWriter('comparative_analysis_v1_vida_comprehensive.xlsx') as writer:
-    comparison_stats.to_excel(writer, sheet_name='Summary_Statistics', index=False)
-    pairwise_df.to_excel(writer, sheet_name='Statistical_Tests', index=False)
-    
-    # Individual model monthly trends
-    for model in target_models:
-        model_monthly = df[df['BIKE_GROUPED'] == model].groupby('WARRANTY_MONTH').agg({
-            'COST_PER_UNIT': ['mean', 'std', 'min', 'max'],
-            'WARRANTY_COST': 'sum',
-            'VOLUME': 'sum'
-        }).reset_index()
-        model_monthly.columns = ['_'.join(col).strip() if col[1] else col[0] 
-                                  for col in model_monthly.columns.values]
-        model_monthly.to_excel(writer, sheet_name=f'{model.replace(" ", "_")}_Monthly', index=False)
-
-print("
-✓ Comprehensive results exported to 'comparative_analysis_v1_vida_comprehensive.xlsx'")
-
-print("
-" + "="*80)
-print("COMPARATIVE ANALYSIS COMPLETED")
-print("="*80)
-print("
-Generated Outputs:")
-print("  • comparative_trends_v1_vida.png (4 subplots)")
-print("  • individual_trendlines_v1_vida.p
+    model_df = df[df['BIKE_GROUPED'] == model]
+    comparison_data.append({
+        'Model': model,
+        'Type': 'Target',
+        'Records': len(model_df),
+        'Avg_Cost_Per_Unit': round(model_df['COST_PER_UNIT'].mean(), 2),
+        'Median_Cost_Per_Unit': round(model_df['COST_PER_UNIT'].median(), 2),
+        'Std_Cost_Per_Unit': round(model_df[
