@@ -1,59 +1,37 @@
-Non-Digital enquiries propensity model
+Continuous model lifecycle
 
-Overview
+Monitoring
 
-Purpose: Predict conversion likelihood for non-digital enquiries—walk-ins and telephonic enquiries—so teams can route to the right agents, set SLA targets, and tailor offline nurturing to maximize close rates with efficient use of branch capacity.
+Track production vs. historical baseline at a fixed cadence: conversion by decile, lift at top deciles, PR-AUC/AUC, and calibration error per use case and key segments (source, region, device, branch).
 
-Decisions: Agent assignment and escalation, appointment/demo prioritization, outreach cadence selection, and branch-level staffing and follow-up SLAs driven by score bands and expected time-to-convert.
+Add operational checks: treatment compliance by band, time-to-first-touch, SLA adherence, and data quality signals (missingness, schema changes, volume anomalies).
 
-Population and scope
+Establish alert thresholds and owners: define breach levels for metric drops or drift; route alerts to model ops and business owners with recommended first actions.
 
-In-scope: Leads captured at physical locations (showrooms, dealerships, events) and via inbound/outbound phone interactions that are recorded in CRM/CCaaS with consent and sufficient identifiers for outcomes tracking.
+Review
 
-Exclusions: Missing consent, insufficient identifiers, duplicate enquiries across channels, and records lacking minimal interaction detail to protect integrity, compliance, and actionability.
+Weekly operational review: investigate alerts, check cohort performance, validate playbook adherence, and document quick fixes or threshold tweaks.
 
-Outcome and labeling
+Monthly business review: assess budget/capacity allocation changes driven by propensity, partner/source rebalancing, and any playbook updates; confirm KPI impact against baseline.
 
-Target: Conversion within a defined window (e.g., 30–60 days) confirmed via CRM; apply timestamped joins and leakage controls (e.g., no post-outcome features in training) to ensure clean supervision.
+Quarterly governance review: approve version changes, fairness/privacy checks, audit trails, and update risk notes and misuse guidance.
 
-Label integrity: Standardize branch and call-center timestamps, enforce unique enquiry IDs, and audit deduplication of repeat visits or callbacks to prevent inflated performance from double-counting.
+Model refresh
 
-Feature design
+Data and features: incorporate new campaigns/partners, emerging engagement or call-center signals, and resolved data quality improvements; retire stale or unstable features.
 
-Interaction signals: First-contact channel (walk-in vs. phone), enquiry recency/frequency, talk time, hold/transfers, callback latency, appointment scheduled, and no-show history capturing intent and friction.
+Recalibration and thresholds: re-fit and calibrate models, re-evaluate decile cut points, and re-map action bands; backtest against the same historical baseline window for comparability.
 
-Agent/branch context: Agent tenure and performance tiers, queue length at contact time, branch traffic load, hours/daypart, and regional seasonality reflecting operational conditions that shape conversion.
+Validation and rollout: run holdout and segment checks, pilot in shadow mode or partial traffic, document changes in a versioned model card, then promote with rollback plan.
 
-Prospect profile: Product interest, budget bracket if captured, location distance to branch, prior service history, and eligibility flags to separate high-likelihood enquiries from general footfall.
+Cadence and ownership
 
-Model approach
+Cadence: monitoring daily/weekly, operational review weekly, business review monthly, governance/refresh quarterly or on-threshold breach.
 
-Algorithms: Supervised propensity model for tabular data with imbalance handling; selection guided by AUC, PR-AUC, lift at top deciles, and calibration to support routing and SLA decisions with reliable probability estimates.
+Ownership: name accountable leads for analytics (metrics/drift), operations (treatments/SLAs), and governance (approvals/risks) to ensure timely actions and auditability.
 
-Validation: Time-aware splits with segment cuts by branch, region, agent tier, daypart, and enquiry type; holdout evaluation vs. historical baseline to set thresholds and ensure fair generalization across branches.
+Deliverables
 
-Scale, bands, and time-to-convert classes
+Standard dashboard: coverage, score distribution, conversion by decile, lift vs. baseline, calibration, treatment compliance, and time-to-convert distribution.
 
-Unified scale: Scores on a 0–1 scale mapped to deciles and operational bands (High, Medium, Low) consistent with other channels for unified reporting and playbooks.
-
-Estimated conversion time: Classify leads into conversion windows—within 3 days, within 7 days, 15 days, 30 days, and more than 30 days—to align urgency, appointment scheduling, and follow-up cadence with expected time-to-close.
-
-Action playbook examples
-
-High propensity, 0–3 days: Senior-agent routing or manager callback, same-day appointment or test ride/demo, and tailored offer; trigger inventory hold or priority slot where applicable to accelerate close.
-
-Medium propensity, 7–15 days: Structured follow-up plan with reminders, value-focused content, and scheduled check-ins; offer flexible appointment options and light incentives to move consideration forward.
-
-Low propensity, 30+ days: Cost-conscious offline touches, periodic check-ins, and recycle rules; focus front-line capacity on higher bands while preserving long-tail opportunities at minimal cost.
-
-Performance and monitoring
-
-Reporting: AUC/PR-AUC, lift at top 10–30%, conversion by decile, calibration plots, and branch/agent-segment cuts to guide routing, staffing, and threshold tuning.
-
-Monitoring: Track production vs. historical baseline for conversion by decile, lift, calibration drift, treatment compliance, and branch-level drift; alerts trigger playbook adjustments, coaching, or retraining as needed.
-
-Operations and refresh
-
-Cadence: Regular model refresh to incorporate seasonality, staffing changes, and monitoring learnings; re-calibrate thresholds and band-specific SLAs to sustain accuracy and operational lift over time.
-
-Governance: Privacy and consent controls for call recordings and in-branch data, feature and version audit trails, documented limitations and misuse warnings, and clear rollback procedures to maintain trust and compliance
+Change log: version, date, rationale, dataset span, feature deltas, metric deltas, and rollout notes, kept alongside the model card for traceability.
