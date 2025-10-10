@@ -32,17 +32,11 @@ Algorithms: Supervised propensity modeling for tabular data with imbalance handl
 
 Validation: Time-aware splits with segment cuts by source/device/region and a holdout set; compare to historical baselines to set thresholds responsibly.
 
-Score interpretation
+Scale, bands, and time-to-convert classes
 
-Scale and bands: Scores 0–1 mapped to deciles and operational bands (High, Medium, Low) for clear actionability and unified reporting across channels.
+Unified scale: Scores on a 0–1 scale mapped to deciles and operational bands for reporting and actionability across channels while preserving model-specific features.
 
-Examples:
-
-High band: Immediate callback or chat escalation, personalized offer follow-up, and suppress redundant retargeting to reduce waste.
-
-Medium band: Structured nurture with intent-matched content, timed reminders, and selective retargeting to lift consideration efficiently.
-
-Low band: Cost-conscious touches, light remarketing, and recycle rules to protect CPA while capturing late converters.
+Estimated conversion time: Using propensity plus survival-style calibration, classify leads into time buckets—within 3 days, within 7 days, 15 days, 30 days, and more than 30 days—to align outreach urgency, cadence, and offer ladders with expected conversion timing.
 
 Performance and monitoring
 
