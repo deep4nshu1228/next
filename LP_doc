@@ -1,21 +1,61 @@
-Business problem and approach
+Digital Website propensity model
 
-Problem statement
+Overview
 
-Objective: Enable data-driven prioritization and treatment of all inbound leads by predicting conversion likelihood to increase conversions, reduce cost per acquisition, and improve response SLAs under a consistent, auditable decision framework across channels.
+Purpose: Estimate the probability that a website-origin lead will convert within a defined window so teams can fast-track high-intent leads, tailor follow-ups, and optimize offer timing and channel mix.
 
-Business pain: High and variable lead volumes with uneven intent signals create delayed responses, generic treatments, and inefficient sales effort, resulting in missed revenue and inconsistent customer experience without a unified scoring standard.
+Decisions: Lead triage, next-best-action, and SLA targets driven by score bands and deciles for consistent, scalable execution across digital funnels.
 
-Decision supported: Lead triage (who to contact first), next-best-action selection (offer, channel, cadence), budget and capacity allocation, and SLA targets by score band to align marketing and sales execution with measurable uplift.
+Population and scope
 
-Success criteria: Demonstrable lift at top deciles vs. historical baseline, improved calibration and conversion by decile, faster time-to-first-touch for high-propensity leads, and lower CPA through focused effort on validated segments.
+In-scope: Leads generated from website forms, chat, quote/configurator requests, and identifiable high-intent sessions linked to CRM records with consent.
 
-Approach
+Exclusions: Incomplete identifiers, missing consent, obvious test submissions, and sessions outside lookback windows to preserve data integrity and compliance.
 
-Multi-model design: Separate propensity models are maintained for each use context (Digital Website, Digital Non-Website, Non-Digital enquiries) because channels differ in data availability, feature distributions, intent signals, and operational actions, which impacts both predictive performance and business applicability.
+Outcome and labeling
 
-Feature tailoring: Each model uses channel-appropriate features—for example, web engagement and session intent for site leads, source/partner and campaign attributes for non-website digital, and agent interaction and contact-center or walk-in signals for non-digital—to maximize signal and preserve actionability.
+Target: Conversion within a business-defined window (e.g., 30–60 days) using timestamped events and leakage controls; consistent definition enables comparable deciles over time.
 
-Consistent scoring framework: Despite different feature sets, all models output calibrated scores on a common 0–1 scale with deciles and operational bands, enabling unified reporting, thresholding, and playbooks across channels while retaining model-specific strengths.
+Label quality: Audit joins between web events and CRM outcomes, ensure unique lead keys, and validate event chronology to prevent optimistic bias.
 
-Validation and baselines: Time-aware validation, segment-level evaluation, and lift vs. historical baselines are applied per model to ensure reliability; thresholds and playbooks are tuned by channel to convert predicted propensity into measurable commercial impact.
+Feature design
+
+Engagement intent: Session depth, time on site, key page views (pricing, checkout, dealer locator), return visits, micro-conversions, and abandonment points capturing latent intent.
+
+Acquisition context: Channel/source/medium, campaign and keyword metadata, device/geo, first vs. last touch, and recency/frequency to differentiate traffic cohorts.
+
+Form/chat signals: Field completeness, response latency, error counts, entity-intent in chat, and prior known-user status for stronger intent separation.
+
+Model approach
+
+Algorithms: Supervised propensity modeling for tabular data with imbalance handling; selection based on AUC, PR-AUC, lift at top deciles, and calibration reliability.
+
+Validation: Time-aware splits with segment cuts by source/device/region and a holdout set; compare to historical baselines to set thresholds responsibly.
+
+Score interpretation
+
+Scale and bands: Scores 0–1 mapped to deciles and operational bands (High, Medium, Low) for clear actionability and unified reporting across channels.
+
+Examples:
+
+High band: Immediate callback or chat escalation, personalized offer follow-up, and suppress redundant retargeting to reduce waste.
+
+Medium band: Structured nurture with intent-matched content, timed reminders, and selective retargeting to lift consideration efficiently.
+
+Low band: Cost-conscious touches, light remarketing, and recycle rules to protect CPA while capturing late converters.
+
+Performance and monitoring
+
+Reporting: AUC/PR-AUC, lift at top 10–30%, conversion by decile, and calibration plots; segment performance informs budget shifts and threshold tuning.
+
+Monitoring: Production vs. historical baseline for conversion by decile, lift, calibration drift, and treatment compliance; alerts trigger playbook or model updates.
+
+Operations and refresh
+
+Cadence: Regular model refresh incorporating new traffic patterns, campaigns, and monitoring learnings to sustain accuracy and business lift over time.
+
+Governance: Privacy and consent controls, feature and version audit trails, and clear limitations/misuse guidance to maintain trust and compliance.
+
+Notes on alignment
+
+Multi-model consistency: This propensity model shares a common calibrated 0–1 scale and banding with the other use cases, enabling unified dashboards and playbooks while retaining channel-specific features for accuracy and actionability.
