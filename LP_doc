@@ -1,55 +1,13 @@
-Digital Website propensity model
+Digital Non-Website propensity model
 
 Overview
 
-Purpose: Estimate the probability that a website-origin lead will convert within a defined window so teams can fast-track high-intent leads, tailor follow-ups, and optimize offer timing and channel mix.
+Purpose: Predict conversion likelihood for leads originating from non-website digital sources (paid media, aggregators/marketplaces, affiliates, social platforms, influencer and partner programs) to optimize budget allocation, creative/audience strategy, and follow-up prioritization across channels.
 
-Decisions: Lead triage, next-best-action, and SLA targets driven by score bands and deciles for consistent, scalable execution across digital funnels.
+Decisions: Source/partner budget shifts, creative and audience refinement, lead triage and SLA targets by propensity band, and cadence selection for outreach and nurture programs.
 
 Population and scope
 
-In-scope: Leads generated from website forms, chat, quote/configurator requests, and identifiable high-intent sessions linked to CRM records with consent.
+In-scope: Leads captured via third-party lead providers, social ads and DMs, affiliate and influencer programs, comparison sites, and paid search/display that do not submit through the website form flow but sync to CRM with consent.
 
-Exclusions: Incomplete identifiers, missing consent, obvious test submissions, and sessions outside lookback windows to preserve data integrity and compliance.
-
-Outcome and labeling
-
-Target: Conversion within a business-defined window (e.g., 30–60 days) using timestamped events and leakage controls; consistent definition enables comparable deciles over time.
-
-Label quality: Audit joins between web events and CRM outcomes, ensure unique lead keys, and validate event chronology to prevent optimistic bias.
-
-Feature design
-
-Engagement intent: Session depth, time on site, key page views (pricing, checkout, dealer locator), return visits, micro-conversions, and abandonment points capturing latent intent.
-
-Acquisition context: Channel/source/medium, campaign and keyword metadata, device/geo, first vs. last touch, and recency/frequency to differentiate traffic cohorts.
-
-Form/chat signals: Field completeness, response latency, error counts, entity-intent in chat, and prior known-user status for stronger intent separation.
-
-Model approach
-
-Algorithms: Supervised propensity modeling for tabular data with imbalance handling; selection based on AUC, PR-AUC, lift at top deciles, and calibration reliability.
-
-Validation: Time-aware splits with segment cuts by source/device/region and a holdout set; compare to historical baselines to set thresholds responsibly.
-
-Scale, bands, and time-to-convert classes
-
-Unified scale: Scores on a 0–1 scale mapped to deciles and operational bands for reporting and actionability across channels while preserving model-specific features.
-
-Estimated conversion time: Using propensity plus survival-style calibration, classify leads into time buckets—within 3 days, within 7 days, 15 days, 30 days, and more than 30 days—to align outreach urgency, cadence, and offer ladders with expected conversion timing.
-
-Performance and monitoring
-
-Reporting: AUC/PR-AUC, lift at top 10–30%, conversion by decile, and calibration plots; segment performance informs budget shifts and threshold tuning.
-
-Monitoring: Production vs. historical baseline for conversion by decile, lift, calibration drift, and treatment compliance; alerts trigger playbook or model updates.
-
-Operations and refresh
-
-Cadence: Regular model refresh incorporating new traffic patterns, campaigns, and monitoring learnings to sustain accuracy and business lift over time.
-
-Governance: Privacy and consent controls, feature and version audit trails, and clear limitations/misuse guidance to maintain trust and compliance.
-
-Notes on alignment
-
-Multi-model consistency: This propensity model shares a common calibrated 0–1 scale and banding with the other use cases, enabling unified dashboards and playbooks while retaining channel-specific features for accuracy and actionability.
+Exclusions: Duplicates across partners, incomplete identifiers or missing consent, and low-veracity sources failing quality thresholds to protect performance and compliance
