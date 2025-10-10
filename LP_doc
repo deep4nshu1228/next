@@ -1,32 +1,21 @@
-### 
-Lead Propensity Models
+Business problem and approach
 
-Purpose
+Problem statement
 
-Predict conversion likelihood across three channels to prioritize outreach, tailor treatments, and improve marketing and sales efficiency while enhancing customer experience.
+Objective: Enable data-driven prioritization and treatment of all inbound leads by predicting conversion likelihood to increase conversions, reduce cost per acquisition, and improve response SLAs under a consistent, auditable decision framework across channels.
 
-Provide calibrated scores and clear action bands so teams can fast-track high-intent leads, nurture mid-tier segments efficiently, and reduce wasted effort on low-propensity leads.
+Business pain: High and variable lead volumes with uneven intent signals create delayed responses, generic treatments, and inefficient sales effort, resulting in missed revenue and inconsistent customer experience without a unified scoring standard.
 
-Use cases
+Decision supported: Lead triage (who to contact first), next-best-action selection (offer, channel, cadence), budget and capacity allocation, and SLA targets by score band to align marketing and sales execution with measurable uplift.
 
-Digital Website Leads: Score web-origin leads (forms, sessions) to enable rapid follow-up, personalized offers, and optimized timing based on intent signals.
+Success criteria: Demonstrable lift at top deciles vs. historical baseline, improved calibration and conversion by decile, faster time-to-first-touch for high-propensity leads, and lower CPA through focused effort on validated segments.
 
-Digital Non-Website Leads: Score paid media, aggregators, and social leads to guide budget allocation, creative optimization, and cadence by propensity segment.
+Approach
 
-Non-Digital Enquiries: Score call-center, dealership, and event leads to inform agent assignment, SLA targets, and offline nurturing strategies that balance cost and impact.
+Multi-model design: Separate propensity models are maintained for each use context (Digital Website, Digital Non-Website, Non-Digital enquiries) because channels differ in data availability, feature distributions, intent signals, and operational actions, which impacts both predictive performance and business applicability.
 
-Business outcome
+Feature tailoring: Each model uses channel-appropriate features—for example, web engagement and session intent for site leads, source/partner and campaign attributes for non-website digital, and agent interaction and contact-center or walk-in signals for non-digital—to maximize signal and preserve actionability.
 
-Higher conversion rates through priority handling of high-propensity leads and structured nurturing of medium segments, proven via lift at top deciles and calibrated thresholds.
+Consistent scoring framework: Despite different feature sets, all models output calibrated scores on a common 0–1 scale with deciles and operational bands, enabling unified reporting, thresholding, and playbooks across channels while retaining model-specific strengths.
 
-Lower cost per acquisition by concentrating spend and human effort where uplift is measurable and scalable across channels and segments.
-
-Faster response times and better customer experience by tying service levels, channels, and offer ladders directly to score bands and deciles.
-
-What’s next
-
-Execute A/B tests by channel to quantify uplift, refine thresholds, and validate next-best-action playbooks; standardize metrics (AUC/PR-AUC, lift, calibration) for ongoing reporting.
-
-Operationalize monitoring for data/label drift, conversion by decile, and treatment compliance; define retraining triggers and update playbooks as experiments complete.
-
-Align dashboards to business KPIs: coverage, score distribution, conversion by decile, uplift vs. baseline, and SLA adherence to ensure clear line-of-sight to impact and accountability.
+Validation and baselines: Time-aware validation, segment-level evaluation, and lift vs. historical baselines are applied per model to ensure reliability; thresholds and playbooks are tuned by channel to convert predicted propensity into measurable commercial impact.
