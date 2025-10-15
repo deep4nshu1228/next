@@ -8,11 +8,11 @@ Actionability and ethics: Each propensity band and time-to-convert window maps t
 
 Business inputs
 
-Thresholds and bands: Decile cut points and time-window classes (within 3, 7, 15, 30, >30 days) are approved by sales/marketing owners per channel to align with capacity, SLAs, and budget.​
+Conversion horizon: 90-day conversion window is the authoritative baseline for all performance metrics, thresholds, and reporting views; any changes require governance approval.
 
-Playbooks: For each band/window, define channel, cadence, offers, and suppression rules; review monthly to reflect campaign mix, partner performance, staffing, and seasonal demand.​
+Existing customers: For known customers, service engagement history (e.g., recent service visits, tickets, interactions) may be used as directional input to inform treatment strategies, subject to consent, privacy, and model feature policies.
 
-Governance and ownership: Named owners for metrics, playbooks, and approvals; a versioned change log documents rationale, dataset span, metric deltas, and rollout notes for auditability.​
+Bands and SLAs: Decile cut points, time-window classes (within 3, 7, 15, 30, >30 days), and channel SLAs are owned and approved by sales/marketing to align with capacity, budget, and customer experience goals.
 
 Exception handling
 
