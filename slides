@@ -126,7 +126,16 @@ Operations: Maintain monthly review touchpoints, track error and coverage, and a
 Title: Features Used for Model Training
 
 Direct features
-Dispatch volume, bike model family, age, warranty year, and dispatch year are used as‑is from the curated data pipeline to capture scale, product mix, lifecycle, and calendar context without transformation.
+
+Dispatch volume: captures scale of in-field population impacting expected claims.
+
+Bike model family: encodes product lineage and design differences.
+
+Age: represents months-in-field to capture lifecycle effects.
+
+Warranty year: controls annual policy/process shifts.
+
+Dispatch year: anchors cohort effects tied to production periods.
 
 Derived features
 Trend and momentum: EMA, previous‑month costing, and rolling mean summarize recent movement and smooth short‑term noise for stable month‑ahead signals.
