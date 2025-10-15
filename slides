@@ -120,3 +120,24 @@ Enhancements: Iterate on features and hyperparameters, monitor drift and varianc
 Operations: Maintain monthly review touchpoints, track error and coverage, and apply overrides only when documented criteria are met.
 
 
+
+
+#################
+Title: Features Used for Model Training
+
+Direct features
+Dispatch volume, bike model family, age, warranty year, and dispatch year are used as‑is from the curated data pipeline to capture scale, product mix, lifecycle, and calendar context without transformation.
+
+Derived features
+Trend and momentum: EMA, previous‑month costing, and rolling mean summarize recent movement and smooth short‑term noise for stable month‑ahead signals.
+
+Change and volatility: Percent change and rolling standard deviation detect inflections and variability that often precede shifts in warranty cost.
+
+Seasonality encodings: Sine and cosine transforms of warranty month and dispatch month provide cyclic seasonality without discontinuities at year boundaries.
+
+Product lifecycle: Lifecycle phase tags where each model family sits on its maturity curve, complementing age with business‑friendly segments.
+
+Data hygiene notes
+All derived fields are generated from auditable transformations on the direct features, with consistent look‑back windows and calendar alignment to avoid leakage.
+
+
