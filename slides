@@ -150,3 +150,19 @@ Data hygiene notes
 All derived fields are generated from auditable transformations on the direct features, with consistent look‑back windows and calendar alignment to avoid leakage.
 
 
+
+
+
+###############
+Title: Observation Window and Forecast Setup
+
+Observation window: 3 months prior to the reference month, ensuring all features reflect the most recent, usable signal without leakage.
+
+Training cutoff: model trained on data through July 2025; no information beyond this date was used when generating forecasts.
+
+Forecast horizon: produced in August 2025 for the next 60 months, covering August 2025 through July 2030.
+
+Dispatch scope: last 60 dispatch months relative to each reference month are considered to represent the active in‑field base.
+
+What’s shown next: a comparison of actuals vs predictions for August 2025 and September 2025, with brief commentary on month-level deviations and fit.
+
