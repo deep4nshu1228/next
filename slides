@@ -166,3 +166,11 @@ Dispatch scope: last 60 dispatch months relative to each reference month are con
 
 What’s shown next: a comparison of actuals vs predictions for August 2025 and September 2025, with brief commentary on month-level deviations and fit.
 
+
+
+
+Forecast run: executed in August 2025 using data available through July 2025, producing a 60‑month outlook from August 2025 to July 2030.
+
+Monitoring window: the observation window is the next 3 months after the August 2025 run—August, September, and October 2025—used to track real‑world performance against the forecasts and capture any early drift.
+
+Input scope reminder: features referencing dispatch activity use the last 60 dispatch months relative to August 2025 to reflect the active in‑field base.
