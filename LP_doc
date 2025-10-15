@@ -1,37 +1,27 @@
-Continuous model lifecycle
+Assumptions
 
-Monitoring
+Data comparability: Training and production populations remain comparable after consent filtering, deduplication, and timestamp integrity checks; no post-outcome signals leak into features used for training or scoring.​
 
-Track production vs. historical baseline at a fixed cadence: conversion by decile, lift at top deciles, PR-AUC/AUC, and calibration error per use case and key segments (source, region, device, branch).
+Stationarity bounds: Feature and label distributions may drift within monitored thresholds; exceeding thresholds triggers recalibration or refresh per the lifecycle policy to preserve calibration and lift.​
 
-Add operational checks: treatment compliance by band, time-to-first-touch, SLA adherence, and data quality signals (missingness, schema changes, volume anomalies).
+Actionability and ethics: Each propensity band and time-to-convert window maps to an approved treatment; scores guide prioritization and experimentation, not deterministic approvals or denials, with privacy constraints consistently applied.​
 
-Establish alert thresholds and owners: define breach levels for metric drops or drift; route alerts to model ops and business owners with recommended first actions.
+Business inputs
 
-Review
+Thresholds and bands: Decile cut points and time-window classes (within 3, 7, 15, 30, >30 days) are approved by sales/marketing owners per channel to align with capacity, SLAs, and budget.​
 
-Weekly operational review: investigate alerts, check cohort performance, validate playbook adherence, and document quick fixes or threshold tweaks.
+Playbooks: For each band/window, define channel, cadence, offers, and suppression rules; review monthly to reflect campaign mix, partner performance, staffing, and seasonal demand.​
 
-Monthly business review: assess budget/capacity allocation changes driven by propensity, partner/source rebalancing, and any playbook updates; confirm KPI impact against baseline.
+Governance and ownership: Named owners for metrics, playbooks, and approvals; a versioned change log documents rationale, dataset span, metric deltas, and rollout notes for auditability.​
 
-Quarterly governance review: approve version changes, fairness/privacy checks, audit trails, and update risk notes and misuse guidance.
+Exception handling
 
-Model refresh
+Data intake exceptions: If required fields, consent flags, or schemas are missing, route records to a quarantine queue; log source, timestamp, and field list, and proceed only with a documented fallback or safe “do not score” status.​
 
-Data and features: incorporate new campaigns/partners, emerging engagement or call-center signals, and resolved data quality improvements; retire stale or unstable features.
+Scoring pipeline exceptions: Guard preprocessing and inference; on step failure, capture context, return a safe default, continue batch processing, and page the responsible owner to avoid pipeline-wide halts.​
 
-Recalibration and thresholds: re-fit and calibrate models, re-evaluate decile cut points, and re-map action bands; backtest against the same historical baseline window for comparability.
+Model/service unavailability: Auto-degrade to the last certified model version; if no backup exists, apply business-defined fallback treatment for the affected segment until service restoration.​
 
-Validation and rollout: run holdout and segment checks, pilot in shadow mode or partial traffic, document changes in a versioned model card, then promote with rollback plan.
+Calibration or banding errors: If calibration artifacts or band definitions are invalid or missing, block promotion, revert to the last valid configuration, and notify governance for remediation before resuming scoring.​
 
-Cadence and ownership
-
-Cadence: monitoring daily/weekly, operational review weekly, business review monthly, governance/refresh quarterly or on-threshold breach.
-
-Ownership: name accountable leads for analytics (metrics/drift), operations (treatments/SLAs), and governance (approvals/risks) to ensure timely actions and auditability.
-
-Deliverables
-
-Standard dashboard: coverage, score distribution, conversion by decile, lift vs. baseline, calibration, treatment compliance, and time-to-convert distribution.
-
-Change log: version, date, rationale, dataset span, feature deltas, metric deltas, and rollout notes, kept alongside the model card for traceability.
+Partner/branch anomalies: On partner feed spikes, duplicate bursts, or branch outages, trigger protective rules—rate-limit or defer scoring for the cohort, flag for review, and re-enable post-validation.​
