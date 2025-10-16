@@ -51,3 +51,33 @@ Thresholds and alerts: Define acceptable outlier rates per feature and cohort; i
 Documentation: Maintain a registry of variable-level caps, imputations, and exclusion rules with effective dates and rationale to ensure reproducibility and auditability.
 
 Validation loop: Compare model metrics pre/post-outlier treatment in holdout data; if calibration or lift degrades beyond tolerance, adjust caps or move to robust transformations rather than removal.
+
+
+
+
+
+alculated metrics
+
+Service engagement tier
+
+Definition: Percentage refers to the share of minimum required services completed with Hero within the eligibility window.
+
+Eligibility window: 12 months if no free service tier; 6 months if free service tier.
+
+Percentage formula: Hero services completed in window ÷ minimum required services in window × 100.
+
+Tiers:
+
+High: ≥ 80% of required services with Hero and in-window service present.
+
+Medium: ≥ 50% and < 80% with Hero and in-window service present.
+
+Low: < 50% with Hero and in-window service present.
+
+Not Engaged: Non-existing customer or no qualifying in-window service.
+
+Distinct source and lead counts
+
+Distinct source count: Number of unique lead sources in the period (partners, campaigns, branches, website vs. non-website).
+
+Distinct lead count: Number of unique leads after deduplication (ID/canonical identity); report gross vs. net when needed; segment by channel/use case.
