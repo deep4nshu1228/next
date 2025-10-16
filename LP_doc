@@ -16,12 +16,38 @@ Bands and SLAs: Decile cut points, time-window classes (within 3, 7, 15, 30, >30
 
 Exception handling
 
-Data intake exceptions: If required fields, consent flags, or schemas are missing, route records to a quarantine queue; log source, timestamp, and field list, and proceed only with a documented fallback or safe “do not score” status.​
+Data intake exceptions: If required identifiers, consent flags, or schemas are missing, route records to a quarantine queue; log source, timestamp, and missing fields; apply a “do not score” status unless a documented fallback exists.
 
-Scoring pipeline exceptions: Guard preprocessing and inference; on step failure, capture context, return a safe default, continue batch processing, and page the responsible owner to avoid pipeline-wide halts.​
+Scoring pipeline errors: Guard preprocessing and inference steps; on failure, capture context and error, return a safe default (e.g., unscored status), continue batch processing, and notify the designated owner to avoid pipeline-wide halts.
 
-Model/service unavailability: Auto-degrade to the last certified model version; if no backup exists, apply business-defined fallback treatment for the affected segment until service restoration.​
+Model/service fallback: If the active model is unavailable or times out, automatically degrade to the last certified version; if none is available, apply the business-defined fallback treatment for the impacted segment until restoration.
 
-Calibration or banding errors: If calibration artifacts or band definitions are invalid or missing, block promotion, revert to the last valid configuration, and notify governance for remediation before resuming scoring.​
+Calibration/banding invalidation: If calibration artifacts or band definitions are missing/invalid, block promotion, revert to the last valid configuration, and notify governance prior to resuming scoring.
 
-Partner/branch anomalies: On partner feed spikes, duplicate bursts, or branch outages, trigger protective rules—rate-limit or defer scoring for the cohort, flag for review, and re-enable post-validation.​
+Source/branch anomalies: On partner feed spikes, duplicate bursts, or branch outages, temporarily rate-limit or defer scoring for the affected cohort, flag for operations review, and re-enable post-validation.
+
+Outlier treatment
+
+Detection rules:
+
+Statistical caps: Winsorize or cap numeric features at stable percentiles (for example, 1st/99th) to prevent undue leverage from rare extremes.
+
+Logical validation: Remove impossible values (negative durations, future timestamps) and isolate bursty duplicates or replayed events.
+
+Cohort checks: Monitor per-source/partner and per-branch distributions to detect localized anomalies that global rules may miss.
+
+Channel-specific handling:
+
+Digital non-website: Normalize extreme spend, frequency, and bid/placement metrics; cap provider-reported fields known to be noisy.
+
+Website: Cap session metrics (time on site, pages per session) and form latency; constrain rare event counts that arise from bot or script noise.
+
+Non-digital: Cap talk time, queue wait, and number of transfers; bound appointment counts and repeat-visit bursts for the same lead.
+
+Operational policy:
+
+Thresholds and alerts: Define acceptable outlier rates per feature and cohort; if breached, pause scoring for the cohort and alert owners.
+
+Documentation: Maintain a registry of variable-level caps, imputations, and exclusion rules with effective dates and rationale to ensure reproducibility and auditability.
+
+Validation loop: Compare model metrics pre/post-outlier treatment in holdout data; if calibration or lift degrades beyond tolerance, adjust caps or move to robust transformations rather than removal.
