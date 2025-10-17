@@ -174,3 +174,10 @@ Forecast run: executed in August 2025 using data available through July 2025, pr
 Monitoring window: the observation window is the next 3 months after the August 2025 run—August, September, and October 2025—used to track real‑world performance against the forecasts and capture any early drift.
 
 Input scope reminder: features referencing dispatch activity use the last 60 dispatch months relative to August 2025 to reflect the active in‑field base.
+
+
+
+
+
+Hi Team,As per our discussion with the finance team, here I'm sharing the approach to work on the backtesting and total lifecycle cost calculation.Use Case 1: Backtesting ApproachExpanding Window: Train on 2015-2019, retrain every 6 months adding new data (2015-mid 2020, 2015-2020, etc.), forecast 60 months ahead each time. Training window grows continuously. Will further explore how to handle newer bike models launched only 2 years back with limited historical data.Rolling Window: Train on fixed 5-year window (2015-2019 → 2016-2020 → 2017-2021), retrain every 6 months dropping oldest data, forecast 60 months ahead each time.Use Case 2: Total Lifecycle Cost per UnitCombine actual warranty data (age 1-X months) with predicted data (age X+1 to 60 months) to calculate full lifecycle warranty cost (age 1-60). Divide total lifecycle cost by dispatch volume to get cost per unit for each bike model.Let me know your thoughts.Best regards,
+[Your Name]
