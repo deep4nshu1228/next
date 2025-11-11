@@ -1,0 +1,395 @@
+# -------------------------
+# 0. Setup
+# -------------------------
+import os
+import warnings
+warnings.filterwarnings("ignore")
+
+import logging
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s | %(levelname)s | %(message)s"
+)
+
+import numpy as np
+import pandas as pd
+
+import matplotlib.pyplot as plt
+import seaborn as sns
+from scipy import stats
+
+pd.set_option("display.max_columns", 100)
+pd.set_option("display.width", 160)
+sns.set(style="whitegrid", context="talk")
+
+# -------------------------
+# 1. Load Data
+# -------------------------
+# Provide either a CSV path or a preloaded DataFrame variable name.
+# Option A: CSV path
+CSV_PATH = "parts_accessories_weekly.csv"  # change if needed
+USE_CSV = os.path.exists(CSV_PATH)
+
+if USE_CSV:
+    df = pd.read_csv(CSV_PATH)
+    logging.info(f"Loaded CSV from {CSV_PATH} with shape {df.shape}")
+else:
+    # Option B: If df is already in memory, comment the line below and ensure 'df' exists.
+    try:
+        df  # noqa: F821
+        logging.info(f"Using preloaded DataFrame with shape {df.shape}")
+    except NameError:
+        raise FileNotFoundError("No CSV found and no in-memory DataFrame 'df' defined.")
+
+# -------------------------
+# 2. Standardize Schema
+# -------------------------
+expected_cols = [
+    "CUSTOMER_EXTERNAL_CODE",
+    "SKU_ERP_CODE",
+    "WEEK_START_DATE",
+    "WEEK_END_DATE",
+    "TOTAL_BASE_PRICE",
+    "TOTAL_QUANTITY",
+    "TOTAL_DLP_VALUE",
+]
+missing = [c for c in expected_cols if c not in df.columns]
+if missing:
+    raise ValueError(f"Missing required columns: {missing}")
+
+# Coerce dtypes
+df["WEEK_START_DATE"] = pd.to_datetime(df["WEEK_START_DATE"], errors="coerce")
+df["WEEK_END_DATE"]   = pd.to_datetime(df["WEEK_END_DATE"], errors="coerce")
+
+for num_col in ["TOTAL_BASE_PRICE", "TOTAL_QUANTITY", "TOTAL_DLP_VALUE"]:
+    df[num_col] = pd.to_numeric(df[num_col], errors="coerce")
+
+# Basic null checks
+null_summary = df[expected_cols].isnull().mean().sort_values(ascending=False)
+logging.info("Null ratio by column:\n" + null_summary.to_string())
+
+# Drop rows without dates or identifiers, keep quantitative nulls for now
+df = df.dropna(subset=["CUSTOMER_EXTERNAL_CODE", "SKU_ERP_CODE", "WEEK_START_DATE"])
+logging.info(f"Post ID/date drop shape: {df.shape}")
+
+# Ensure week alignment
+if "WEEK_END_DATE" in df.columns:
+    invalid_week = (df["WEEK_END_DATE"] - df["WEEK_START_DATE"]).dt.days.between(6, 8) == False
+    invalid_rate = invalid_week.mean()
+    logging.info(f"Rows with non 7-day week span: {invalid_rate:.2%} (informational, not dropped)")
+
+# -------------------------
+# 3. Basic Sanity and Derived Fields
+# -------------------------
+# Per-unit prices
+df["UNIT_BASE_PRICE"] = np.where(df["TOTAL_QUANTITY"] > 0,
+                                 df["TOTAL_BASE_PRICE"] / df["TOTAL_QUANTITY"], np.nan)
+
+df["UNIT_DLP_PRICE"] = np.where(df["TOTAL_QUANTITY"] > 0,
+                                df["TOTAL_DLP_VALUE"] / df["TOTAL_QUANTITY"], np.nan)
+
+# Week index fields
+df["YEAR"] = df["WEEK_START_DATE"].dt.isocalendar().year.astype(int)
+df["WEEK"] = df["WEEK_START_DATE"].dt.isocalendar().week.astype(int)
+df["YEAR_WEEK"] = df["WEEK_START_DATE"].dt.strftime("%G-W%V")
+df["MONTH"] = df["WEEK_START_DATE"].dt.month
+df["DOW"] = df["WEEK_START_DATE"].dt.dayofweek
+
+# -------------------------
+# 4. High-Level Overview
+# -------------------------
+n_rows = len(df)
+n_customers = df["CUSTOMER_EXTERNAL_CODE"].nunique()
+n_skus = df["SKU_ERP_CODE"].nunique()
+date_min = df["WEEK_START_DATE"].min()
+date_max = df["WEEK_START_DATE"].max()
+logging.info(f"Rows: {n_rows} | Customers: {n_customers} | SKUs: {n_skus} | Date Range: {date_min.date()} to {date_max.date()}")
+
+display(pd.DataFrame({
+    "metric": ["rows", "unique_customers", "unique_skus", "start", "end", "weeks_span"],
+    "value": [n_rows, n_customers, n_skus, str(date_min.date()), str(date_max.date()), (date_max - date_min).days // 7]
+}))
+
+# Distribution snapshots
+display(df[["TOTAL_QUANTITY", "TOTAL_BASE_PRICE", "TOTAL_DLP_VALUE", "UNIT_BASE_PRICE", "UNIT_DLP_PRICE"]].describe(percentiles=[0.01,0.05,0.25,0.5,0.75,0.95,0.99]))
+
+# -------------------------
+# 5. Integrity Checks
+# -------------------------
+# Negative quantities or values
+neg_qty_rate = (df["TOTAL_QUANTITY"] < 0).mean()
+neg_value_rate = (df["TOTAL_BASE_PRICE"] < 0).mean() or (df["TOTAL_DLP_VALUE"] < 0).mean()
+logging.info(f"Negative quantity rate: {neg_qty_rate:.2%}")
+logging.info(f"Any negative value columns present: {bool(neg_value_rate)}")
+
+# Zero quantity but positive value inconsistencies
+zero_qty_pos_val = ((df["TOTAL_QUANTITY"] == 0) & ((df["TOTAL_BASE_PRICE"] > 0) | (df["TOTAL_DLP_VALUE"] > 0))).mean()
+logging.info(f"Zero quantity with positive value rate: {zero_qty_pos_val:.2%}")
+
+# DLP vs Base sanity
+corr_base_dlp = df[["TOTAL_BASE_PRICE", "TOTAL_DLP_VALUE"]].dropna().corr().iloc[0,1]
+logging.info(f"Correlation TOTAL_BASE_PRICE vs TOTAL_DLP_VALUE: {corr_base_dlp:.3f}")
+
+# -------------------------
+# 6. Time Coverage & Completeness
+# -------------------------
+# Weekly completeness per customer-SKU
+def weekly_grid(group):
+    idx = pd.date_range(group["WEEK_START_DATE"].min(), group["WEEK_START_DATE"].max(), freq="W-MON")
+    g = group.set_index("WEEK_START_DATE").reindex(idx)
+    g.index.name = "WEEK_START_DATE"
+    return g
+
+sample_pairs = (
+    df.groupby(["CUSTOMER_EXTERNAL_CODE", "SKU_ERP_CODE"])
+      .size()
+      .sort_values(ascending=False)
+      .head(20)
+      .index
+)
+
+coverage_stats = []
+for cust, sku in sample_pairs:
+    sub = df[(df["CUSTOMER_EXTERNAL_CODE"] == cust) & (df["SKU_ERP_CODE"] == sku)].copy()
+    g = weekly_grid(sub)
+    prop_missing = g["TOTAL_QUANTITY"].isna().mean()
+    coverage_stats.append({"CUSTOMER_EXTERNAL_CODE": cust, "SKU_ERP_CODE": sku, "missing_weeks_ratio": prop_missing})
+coverage_df = pd.DataFrame(coverage_stats).sort_values("missing_weeks_ratio", ascending=False)
+display(coverage_df.head(10))
+
+# -------------------------
+# 7. Intermittent Demand Diagnostics
+# -------------------------
+# Zero-run length stats per pair
+def zero_run_lengths(series):
+    arr = (series.fillna(0) == 0).astype(int).values
+    if len(arr) == 0: return []
+    runs, count = [], 0
+    for v in arr:
+        if v == 1:
+            count += 1
+        else:
+            if count > 0:
+                runs.append(count)
+                count = 0
+    if count > 0: runs.append(count)
+    return runs
+
+pair_zero_stats = []
+for (cust, sku), g in df.sort_values("WEEK_START_DATE").groupby(["CUSTOMER_EXTERNAL_CODE", "SKU_ERP_CODE"]):
+    q = g["TOTAL_QUANTITY"]
+    runs = zero_run_lengths(q)
+    if len(runs) > 0:
+        pair_zero_stats.append({
+            "CUSTOMER_EXTERNAL_CODE": cust,
+            "SKU_ERP_CODE": sku,
+            "avg_zero_run": np.mean(runs),
+            "max_zero_run": np.max(runs),
+            "nonzero_ratio": (q > 0).mean()
+        })
+zero_stats_df = pd.DataFrame(pair_zero_stats).sort_values("avg_zero_run", ascending=False)
+display(zero_stats_df.head(10))
+
+# -------------------------
+# 8. Price–Quantity Relationship
+# -------------------------
+# Check if unit price is relatively stable per SKU, and its relationship with quantity
+sku_price_disp = (
+    df.groupby("SKU_ERP_CODE")["UNIT_DLP_PRICE"]
+      .agg(["median", "std", "count"])
+      .rename(columns={"median": "unit_price_median", "std": "unit_price_std", "count": "n"})
+      .reset_index()
+)
+sku_price_disp["cv"] = sku_price_disp["unit_price_std"] / sku_price_disp["unit_price_median"]
+display(sku_price_disp.sort_values("cv", ascending=False).head(15))
+
+# Plot sample SKU price vs qty over time
+sample_skus = df["SKU_ERP_CODE"].value_counts().head(3).index.tolist()
+for sku in sample_skus:
+    plot_df = df[df["SKU_ERP_CODE"] == sku].sort_values("WEEK_START_DATE")
+    fig, ax1 = plt.subplots(figsize=(12, 4))
+    ax1.plot(plot_df["WEEK_START_DATE"], plot_df["TOTAL_QUANTITY"], color="tab:blue", label="Quantity")
+    ax1.set_ylabel("TOTAL_QUANTITY")
+    ax2 = ax1.twinx()
+    ax2.plot(plot_df["WEEK_START_DATE"], plot_df["UNIT_DLP_PRICE"], color="tab:red", label="Unit DLP Price")
+    ax2.set_ylabel("UNIT_DLP_PRICE")
+    ax1.set_title(f"SKU {sku}: Quantity vs Unit DLP Price")
+    fig.tight_layout()
+    plt.show()
+
+# -------------------------
+# 9. Weekly Seasonality & Trend
+# -------------------------
+# Aggregate weekly across all customers to see global trend by SKU or overall
+weekly_overall = (
+    df.groupby("WEEK_START_DATE", as_index=False)["TOTAL_QUANTITY"]
+      .sum()
+      .sort_values("WEEK_START_DATE")
+)
+fig, ax = plt.subplots(figsize=(12,4))
+sns.lineplot(data=weekly_overall, x="WEEK_START_DATE", y="TOTAL_QUANTITY", ax=ax)
+ax.set_title("Overall Weekly Quantity")
+plt.show()
+
+# Seasonality by week-of-year (global)
+woy = df.groupby("WEEK")["TOTAL_QUANTITY"].mean().reset_index()
+fig, ax = plt.subplots(figsize=(12,4))
+sns.barplot(data=woy, x="WEEK", y="TOTAL_QUANTITY", color="tab:blue", ax=ax)
+ax.set_title("Mean Quantity by ISO Week")
+plt.xticks(rotation=90)
+plt.show()
+
+# Seasonal boxplot per month
+fig, ax = plt.subplots(figsize=(12,4))
+sns.boxplot(data=df, x="MONTH", y="TOTAL_QUANTITY", ax=ax)
+ax.set_title("Quantity Distribution by Month")
+plt.show()
+
+# -------------------------
+# 10. Customer and SKU Mix
+# -------------------------
+# Top customers and SKUs by total quantity
+top_customers = (
+    df.groupby("CUSTOMER_EXTERNAL_CODE")["TOTAL_QUANTITY"]
+      .sum().sort_values(ascending=False).head(20)
+)
+top_skus = (
+    df.groupby("SKU_ERP_CODE")["TOTAL_QUANTITY"]
+      .sum().sort_values(ascending=False).head(20)
+)
+display(pd.DataFrame({"CUSTOMER_EXTERNAL_CODE": top_customers.index, "TOTAL_QUANTITY": top_customers.values}))
+display(pd.DataFrame({"SKU_ERP_CODE": top_skus.index, "TOTAL_QUANTITY": top_skus.values}))
+
+# Pareto check: contribution of top N
+def pareto_contribution(series, N=20):
+    total = series.sum()
+    contrib = series.sort_values(ascending=False).head(N).sum()
+    return float(contrib)/float(total) if total > 0 else np.nan
+
+cust_pareto_20 = pareto_contribution(df.groupby("CUSTOMER_EXTERNAL_CODE")["TOTAL_QUANTITY"].sum(), 20)
+sku_pareto_20  = pareto_contribution(df.groupby("SKU_ERP_CODE")["TOTAL_QUANTITY"].sum(), 20)
+logging.info(f"Top 20 customers contribution to total qty: {cust_pareto_20:.2%}")
+logging.info(f"Top 20 SKUs contribution to total qty: {sku_pareto_20:.2%}")
+
+# -------------------------
+# 11. Outlier Screening
+# -------------------------
+# Winsorizing helper (non-destructive: creates columns)
+def winsorize_series(s, lower_q=0.01, upper_q=0.99):
+    lo, hi = s.quantile(lower_q), s.quantile(upper_q)
+    return s.clip(lower=lo, upper=hi)
+
+df["TOTAL_QUANTITY_WZ"] = winsorize_series(df["TOTAL_QUANTITY"])
+df["UNIT_DLP_PRICE_WZ"] = winsorize_series(df["UNIT_DLP_PRICE"])
+
+# Z-scores per SKU for quantity
+z_outliers = []
+for sku, g in df.groupby("SKU_ERP_CODE"):
+    q = g["TOTAL_QUANTITY"].astype(float)
+    if q.std(ddof=0) == 0 or len(q) < 8:
+        continue
+    z = (q - q.mean()) / q.std(ddof=0)
+    idx = g.index[(z > 3) | (z < -3)]
+    z_outliers.extend(idx.tolist())
+
+logging.info(f"Z-score quantity outlier rows (|z|>3): {len(z_outliers)}")
+
+# -------------------------
+# 12. Stockout-like Signals (Heuristic)
+# -------------------------
+# Heuristic: weeks with zero quantity preceded by nonzero with stable price might indicate unobserved stockouts.
+# This is heuristic; confirm with inventory/availability flags if available.
+
+df = df.sort_values(["CUSTOMER_EXTERNAL_CODE", "SKU_ERP_CODE", "WEEK_START_DATE"])
+df["QTY_LAG_1"] = df.groupby(["CUSTOMER_EXTERNAL_CODE", "SKU_ERP_CODE"])["TOTAL_QUANTITY"].shift(1)
+df["PRICE_LAG_4"] = df.groupby("SKU_ERP_CODE")["UNIT_DLP_PRICE"].transform(lambda s: s.rolling(4, min_periods=1).median())
+
+df["possible_stockout"] = (
+    (df["TOTAL_QUANTITY"] == 0) &
+    (df["QTY_LAG_1"] > 0) &
+    (df["UNIT_DLP_PRICE"].notna()) &
+    (df["PRICE_LAG_4"].notna())
+)
+
+stockout_rate = df["possible_stockout"].mean()
+logging.info(f"Heuristic stockout-like rate: {stockout_rate:.2%}")
+
+# -------------------------
+# 13. Correlations and Elasticity Proxy
+# -------------------------
+# Global rank correlation quantity vs price
+valid = df[["TOTAL_QUANTITY", "UNIT_DLP_PRICE"]].dropna()
+if len(valid) > 10:
+    spearman_r = stats.spearmanr(valid["TOTAL_QUANTITY"], valid["UNIT_DLP_PRICE"]).correlation
+    pearson_r = stats.pearsonr(valid["TOTAL_QUANTITY"], valid["UNIT_DLP_PRICE"])[0]
+    logging.info(f"Quantity vs Unit DLP Price correlation (Spearman): {spearman_r:.3f}")
+    logging.info(f"Quantity vs Unit DLP Price correlation (Pearson): {pearson_r:.3f}")
+
+# -------------------------
+# 14. Cohort-Like Stability: New vs Existing Customers
+# -------------------------
+first_purchase = (
+    df[df["TOTAL_QUANTITY"] > 0]
+    .groupby("CUSTOMER_EXTERNAL_CODE")["WEEK_START_DATE"].min()
+    .rename("first_week")
+)
+df = df.merge(first_purchase, on="CUSTOMER_EXTERNAL_CODE", how="left")
+df["customer_tenure_weeks"] = ((df["WEEK_START_DATE"] - df["first_week"]).dt.days // 7).astype("Int64")
+df["is_new_customer"] = df["customer_tenure_weeks"].notna() & (df["customer_tenure_weeks"] < 8)
+
+cohort_agg = (
+    df.groupby(["WEEK_START_DATE", "is_new_customer"])["TOTAL_QUANTITY"]
+      .sum().reset_index()
+)
+plt.figure(figsize=(12,4))
+sns.lineplot(data=cohort_agg, x="WEEK_START_DATE", y="TOTAL_QUANTITY", hue="is_new_customer")
+plt.title("Weekly Quantity: New vs Existing Customers")
+plt.show()
+
+# -------------------------
+# 15. Stationarity Quick Checks (Global)
+# -------------------------
+# Augmented Dickey-Fuller test on overall demand
+try:
+    from statsmodels.tsa.stattools import adfuller
+    overall_series = weekly_overall.set_index("WEEK_START_DATE")["TOTAL_QUANTITY"].asfreq("W-WED")  # weekly anchor
+    overall_series = overall_series.interpolate()
+    adf_result = adfuller(overall_series.dropna(), autolag="AIC")
+    logging.info(f"ADF Statistic: {adf_result[0]:.3f}, p-value: {adf_result[1]:.4f}")
+except Exception as e:
+    logging.warning(f"ADF test skipped: {e}")
+
+# -------------------------
+# 16. Train/Validation Split Scaffold
+# -------------------------
+# Define a cutoff for model development: last N weeks for validation
+N_VALID_WEEKS = 8
+max_week = df["WEEK_START_DATE"].max()
+val_start = max_week - pd.to_timedelta(7 * (N_VALID_WEEKS - 1), unit="D")
+logging.info(f"Validation window start: {val_start.date()} (last {N_VALID_WEEKS} weeks)")
+
+df["SPLIT"] = np.where(df["WEEK_START_DATE"] >= val_start, "VALID", "TRAIN")
+display(df["SPLIT"].value_counts())
+
+# -------------------------
+# 17. Save Cleaned/Annotated Data (Optional)
+# -------------------------
+OUT_PATH = "parts_accessories_weekly_eda_output.parquet"
+df.to_parquet(OUT_PATH, index=False)
+logging.info(f"Wrote annotated dataset to {OUT_PATH}")
+
+# -------------------------
+# 18. Next Steps Notes (Markdown cell suggestion)
+# -------------------------
+# - Feature engineering candidates:
+#   - Rolling demand features per customer–SKU (e.g., 4/8/12-week means, lags).
+#   - Intermittency features: nonzero_ratio, zero_run stats merged as features.
+#   - Calendar features: week-of-year sin/cos, month dummies, festival/holiday flags.
+#   - Price-related: relative price index per SKU, promo flags if available.
+# - Modeling paths:
+#   - Intermittent demand models: Croston/SBA/TSB per pair; or ML with zero-inflation handling.
+#   - Global tree-based models with entity embeddings for SKU and customer.
+#   - Hybrid: classify zero vs non-zero, then regress positive demand.
+# - Evaluation:
+#   - Weighted sMAPE/MAPE by revenue, P50/P90 pinball loss if probabilistic forecasting.
+#   - Rolling-origin cross-validation by week.
