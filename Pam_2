@@ -214,3 +214,95 @@ plt.show()
 customer_purchase_weeks.to_csv('customer_purchase_frequency.csv', index=False)
 contribution_by_bucket.to_csv('consistency_bucket_contribution.csv', index=False)
 logging.info("Saved customer_purchase_frequency.csv and consistency_bucket_contribution.csv")
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+# =============================================================================
+# Customers with exactly one order in the last 6 months
+# Requirements:
+# - df has columns: CUSTOMER_EXTERNAL_CODE, WEEK_START_DATE, TOTAL_QUANTITY, TOTAL_DLP_VALUE, TOTAL_BASE_PRICE, SKU_ERP_CODE
+# - Weekly grain; "ordered" means TOTAL_QUANTITY > 0
+# =============================================================================
+
+import pandas as pd
+import numpy as np
+import logging
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
+
+# 1) Define rolling 6-month window end based on data max date (or set explicit as_of_date)
+as_of_date = pd.to_datetime(df["WEEK_START_DATE"].max())
+start_6m = as_of_date - pd.DateOffset(months=6)
+
+logging.info(f"6M window: {start_6m.date()} to {as_of_date.date()}")
+
+# 2) Filter to last 6 months and define 'ordered' condition
+df_6m = df[(df["WEEK_START_DATE"] >= start_6m) & (df["WEEK_START_DATE"] <= as_of_date)].copy()
+df_6m["ordered_flag"] = (df_6m["TOTAL_QUANTITY"] > 0).astype(int)
+
+# 3) Collapse to weekly customer activity: 1 if customer ordered in that week
+cust_week_ordered = (
+    df_6m.groupby(["CUSTOMER_EXTERNAL_CODE", "WEEK_START_DATE"], as_index=False)["ordered_flag"]
+        .max()
+)
+
+# 4) Count number of distinct ordering weeks per customer
+cust_order_weeks = (
+    cust_week_ordered.groupby("CUSTOMER_EXTERNAL_CODE", as_index=False)["ordered_flag"]
+        .sum()
+        .rename(columns={"ordered_flag": "num_order_weeks_6m"})
+)
+
+# 5) Keep customers who ordered exactly once in the last 6 months
+one_time_customers = cust_order_weeks[cust_order_weeks["num_order_weeks_6m"] == 1][["CUSTOMER_EXTERNAL_CODE"]]
+logging.info(f"Customers with exactly one ordering week in last 6 months: {len(one_time_customers)}")
+
+# 6) Identify the exact week of order for those customers
+one_time_weeks = (
+    cust_week_ordered.merge(one_time_customers, on="CUSTOMER_EXTERNAL_CODE", how="inner")
+                    .query("ordered_flag == 1")[["CUSTOMER_EXTERNAL_CODE", "WEEK_START_DATE"]]
+)
+
+# 7) Retrieve transactional rows for their single-order week (all SKUs that week)
+one_time_orders_rows = (
+    df_6m.merge(one_time_weeks, on=["CUSTOMER_EXTERNAL_CODE", "WEEK_START_DATE"], how="inner")
+         .copy()
+)
+
+# 8) Optional: customer-level summary (value and qty in that single order week)
+one_time_summary = (
+    one_time_orders_rows.groupby(["CUSTOMER_EXTERNAL_CODE", "WEEK_START_DATE"], as_index=False)
+        .agg(
+            total_qty=("TOTAL_QUANTITY", "sum"),
+            total_value=("TOTAL_DLP_VALUE", "sum"),
+            total_base=("TOTAL_BASE_PRICE", "sum"),
+            num_skus=("SKU_ERP_CODE", "nunique")
+        )
+        .sort_values(["WEEK_START_DATE", "CUSTOMER_EXTERNAL_CODE"])
+)
+
+# 9) Save results
+one_time_customers.to_csv("customers_one_time_6m.csv", index=False)
+one_time_weeks.to_csv("customers_one_time_6m_weeks.csv", index=False)
+one_time_orders_rows.to_csv("customers_one_time_6m_order_rows.csv", index=False)
+one_time_summary.to_csv("customers_one_time_6m_summary.csv", index=False)
+
+# 10) Display quick overviews
+display(one_time_summary.head(20))
+display(one_time_customers.head(20))
+
