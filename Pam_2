@@ -1,242 +1,8 @@
 # =============================================================================
-# Customer Purchase Frequency & Consistency Analysis
-# Analyzes how many weeks each customer made purchases (purchase frequency)
-# =============================================================================
-
-import logging
-import numpy as np
-import pandas as pd
-import matplotlib.pyplot as plt
-import seaborn as sns
-
-logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
-
-# Assume df is your cleaned DataFrame from EDA with columns:
-# CUSTOMER_EXTERNAL_CODE, SKU_ERP_CODE, WEEK_START_DATE, TOTAL_QUANTITY
-
-# -------------------------
-# 1. Calculate Total Weeks in Dataset
-# -------------------------
-total_weeks_in_data = df['WEEK_START_DATE'].nunique()
-logging.info(f"Total unique weeks in dataset: {total_weeks_in_data}")
-
-# -------------------------
-# 2. Customer Purchase Week Count
-# -------------------------
-# For each customer, count how many distinct weeks they made a purchase (TOTAL_QUANTITY > 0)
-customer_purchase_weeks = (
-    df[df['TOTAL_QUANTITY'] > 0]
-    .groupby('CUSTOMER_EXTERNAL_CODE')['WEEK_START_DATE']
-    .nunique()
-    .reset_index()
-    .rename(columns={'WEEK_START_DATE': 'weeks_purchased'})
-)
-
-logging.info(f"Total customers who made at least one purchase: {len(customer_purchase_weeks)}")
-
-# -------------------------
-# 3. Purchase Frequency Ratio
-# -------------------------
-# Calculate what % of total weeks each customer purchased
-customer_purchase_weeks['purchase_frequency_ratio'] = (
-    customer_purchase_weeks['weeks_purchased'] / total_weeks_in_data
-)
-
-# Summary statistics
-logging.info("Customer purchase frequency summary:")
-display(customer_purchase_weeks['weeks_purchased'].describe(percentiles=[0.1, 0.25, 0.5, 0.75, 0.9, 0.95, 0.99]))
-
-# -------------------------
-# 4. Distribution: How Many Customers Bought in X Weeks
-# -------------------------
-# Group customers by number of weeks purchased
-weeks_distribution = (
-    customer_purchase_weeks
-    .groupby('weeks_purchased')
-    .size()
-    .reset_index(name='num_customers')
-    .sort_values('weeks_purchased')
-)
-
-logging.info("Distribution of customers by weeks purchased:")
-display(weeks_distribution)
-
-# -------------------------
-# 5. Consistency Buckets
-# -------------------------
-# Categorize customers into consistency buckets
-def categorize_consistency(ratio):
-    if ratio >= 0.9:
-        return 'Very High (>90%)'
-    elif ratio >= 0.7:
-        return 'High (70-90%)'
-    elif ratio >= 0.5:
-        return 'Medium (50-70%)'
-    elif ratio >= 0.3:
-        return 'Low (30-50%)'
-    else:
-        return 'Very Low (<30%)'
-
-customer_purchase_weeks['consistency_bucket'] = customer_purchase_weeks['purchase_frequency_ratio'].apply(categorize_consistency)
-
-consistency_summary = (
-    customer_purchase_weeks
-    .groupby('consistency_bucket')
-    .agg({
-        'CUSTOMER_EXTERNAL_CODE': 'count',
-        'weeks_purchased': ['mean', 'median', 'min', 'max']
-    })
-    .round(2)
-)
-
-logging.info("Customer consistency buckets:")
-display(consistency_summary)
-
-# -------------------------
-# 6. Visualizations
-# -------------------------
-# Histogram: Distribution of weeks purchased
-fig, ax = plt.subplots(figsize=(12, 5))
-sns.histplot(data=customer_purchase_weeks, x='weeks_purchased', bins=50, kde=True, ax=ax, color='steelblue')
-ax.set_xlabel('Number of Weeks Purchased')
-ax.set_ylabel('Number of Customers')
-ax.set_title('Distribution of Customer Purchase Frequency (Weeks Purchased)')
-ax.axvline(customer_purchase_weeks['weeks_purchased'].median(), color='red', linestyle='--', label=f"Median: {customer_purchase_weeks['weeks_purchased'].median():.0f}")
-ax.axvline(customer_purchase_weeks['weeks_purchased'].mean(), color='orange', linestyle='--', label=f"Mean: {customer_purchase_weeks['weeks_purchased'].mean():.0f}")
-ax.legend()
-plt.tight_layout()
-plt.show()
-
-# Bar chart: Consistency buckets
-fig, ax = plt.subplots(figsize=(10, 5))
-consistency_counts = customer_purchase_weeks['consistency_bucket'].value_counts().sort_index()
-sns.barplot(x=consistency_counts.index, y=consistency_counts.values, palette='viridis', ax=ax)
-ax.set_xlabel('Consistency Bucket')
-ax.set_ylabel('Number of Customers')
-ax.set_title('Customer Purchase Consistency Distribution')
-ax.set_xticklabels(ax.get_xticklabels(), rotation=45, ha='right')
-for i, v in enumerate(consistency_counts.values):
-    ax.text(i, v + 50, f'{v:,}', ha='center', fontsize=10)
-plt.tight_layout()
-plt.show()
-
-# CDF: Cumulative distribution of purchase frequency
-fig, ax = plt.subplots(figsize=(12, 5))
-sorted_weeks = np.sort(customer_purchase_weeks['weeks_purchased'].values)
-cumulative_prob = np.arange(1, len(sorted_weeks) + 1) / len(sorted_weeks)
-ax.plot(sorted_weeks, cumulative_prob, linewidth=2, color='teal')
-ax.set_xlabel('Number of Weeks Purchased')
-ax.set_ylabel('Cumulative Proportion of Customers')
-ax.set_title('Cumulative Distribution: Customer Purchase Frequency')
-ax.grid(alpha=0.3)
-ax.axhline(0.5, color='red', linestyle='--', alpha=0.7, label='50th percentile')
-ax.axhline(0.8, color='orange', linestyle='--', alpha=0.7, label='80th percentile')
-ax.legend()
-plt.tight_layout()
-plt.show()
-
-# -------------------------
-# 7. Top Consistent Customers
-# -------------------------
-# Identify most consistent customers (purchased in highest % of weeks)
-top_consistent = customer_purchase_weeks.nlargest(20, 'weeks_purchased')[['CUSTOMER_EXTERNAL_CODE', 'weeks_purchased', 'purchase_frequency_ratio']]
-logging.info("Top 20 most consistent customers:")
-display(top_consistent)
-
-# -------------------------
-# 8. Intermittent vs Regular Customer Split
-# -------------------------
-# Define threshold: e.g., customers who purchased in at least 50% of weeks are "regular"
-REGULAR_THRESHOLD = 0.5
-customer_purchase_weeks['customer_type'] = np.where(
-    customer_purchase_weeks['purchase_frequency_ratio'] >= REGULAR_THRESHOLD,
-    'Regular',
-    'Intermittent'
-)
-
-customer_type_summary = customer_purchase_weeks['customer_type'].value_counts()
-logging.info(f"Customer type split (threshold={REGULAR_THRESHOLD}):")
-display(customer_type_summary)
-
-# Pie chart
-fig, ax = plt.subplots(figsize=(8, 8))
-ax.pie(customer_type_summary.values, labels=customer_type_summary.index, autopct='%1.1f%%', startangle=90, colors=['#66c2a5', '#fc8d62'])
-ax.set_title(f'Regular vs Intermittent Customers
-(Regular = purchased in ≥{REGULAR_THRESHOLD*100:.0f}% of weeks)')
-plt.tight_layout()
-plt.show()
-
-# -------------------------
-# 9. Revenue/Volume Contribution by Consistency
-# -------------------------
-# Merge purchase frequency back to main df to analyze volume/value contribution
-df_with_consistency = df.merge(
-    customer_purchase_weeks[['CUSTOMER_EXTERNAL_CODE', 'weeks_purchased', 'purchase_frequency_ratio', 'consistency_bucket', 'customer_type']],
-    on='CUSTOMER_EXTERNAL_CODE',
-    how='left'
-)
-
-# Aggregate by consistency bucket
-contribution_by_bucket = (
-    df_with_consistency
-    .groupby('consistency_bucket')
-    .agg({
-        'TOTAL_QUANTITY': 'sum',
-        'TOTAL_DLP_VALUE': 'sum',
-        'CUSTOMER_EXTERNAL_CODE': 'nunique'
-    })
-    .rename(columns={'CUSTOMER_EXTERNAL_CODE': 'num_customers'})
-    .reset_index()
-)
-
-contribution_by_bucket['pct_quantity'] = (contribution_by_bucket['TOTAL_QUANTITY'] / contribution_by_bucket['TOTAL_QUANTITY'].sum() * 100).round(2)
-contribution_by_bucket['pct_value'] = (contribution_by_bucket['TOTAL_DLP_VALUE'] / contribution_by_bucket['TOTAL_DLP_VALUE'].sum() * 100).round(2)
-
-logging.info("Revenue/volume contribution by customer consistency:")
-display(contribution_by_bucket)
-
-# Stacked bar: Contribution by consistency
-fig, ax = plt.subplots(figsize=(10, 6))
-x_pos = np.arange(len(contribution_by_bucket))
-ax.bar(x_pos, contribution_by_bucket['pct_quantity'], label='% Total Quantity', alpha=0.8, color='steelblue')
-ax.bar(x_pos, contribution_by_bucket['pct_value'], bottom=contribution_by_bucket['pct_quantity'], label='% Total Value', alpha=0.8, color='coral')
-ax.set_xticks(x_pos)
-ax.set_xticklabels(contribution_by_bucket['consistency_bucket'], rotation=45, ha='right')
-ax.set_ylabel('Percentage Contribution (%)')
-ax.set_title('Quantity & Value Contribution by Customer Consistency')
-ax.legend()
-plt.tight_layout()
-plt.show()
-
-# -------------------------
-# 10. Save Results
-# -------------------------
-customer_purchase_weeks.to_csv('customer_purchase_frequency.csv', index=False)
-contribution_by_bucket.to_csv('consistency_bucket_contribution.csv', index=False)
-logging.info("Saved customer_purchase_frequency.csv and consistency_bucket_contribution.csv")
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-# =============================================================================
-# Customers with exactly one order in the last 6 months
+# Customers with ≤6 interaction weeks in the last 6 months
 # Requirements:
-# - df has columns: CUSTOMER_EXTERNAL_CODE, WEEK_START_DATE, TOTAL_QUANTITY, TOTAL_DLP_VALUE, TOTAL_BASE_PRICE, SKU_ERP_CODE
-# - Weekly grain; "ordered" means TOTAL_QUANTITY > 0
+# - df columns: CUSTOMER_EXTERNAL_CODE, WEEK_START_DATE, TOTAL_QUANTITY, TOTAL_DLP_VALUE, TOTAL_BASE_PRICE, SKU_ERP_CODE
+# - Weekly grain; "interaction" means TOTAL_QUANTITY > 0 in that week
 # =============================================================================
 
 import pandas as pd
@@ -245,64 +11,76 @@ import logging
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
 
-# 1) Define rolling 6-month window end based on data max date (or set explicit as_of_date)
+# 1) Define analysis window (last 6 months ending at max data date)
 as_of_date = pd.to_datetime(df["WEEK_START_DATE"].max())
 start_6m = as_of_date - pd.DateOffset(months=6)
-
 logging.info(f"6M window: {start_6m.date()} to {as_of_date.date()}")
 
-# 2) Filter to last 6 months and define 'ordered' condition
+# 2) Filter to last 6 months and mark interactions
 df_6m = df[(df["WEEK_START_DATE"] >= start_6m) & (df["WEEK_START_DATE"] <= as_of_date)].copy()
-df_6m["ordered_flag"] = (df_6m["TOTAL_QUANTITY"] > 0).astype(int)
+df_6m["interaction_flag"] = (df_6m["TOTAL_QUANTITY"] > 0).astype(int)
 
-# 3) Collapse to weekly customer activity: 1 if customer ordered in that week
-cust_week_ordered = (
-    df_6m.groupby(["CUSTOMER_EXTERNAL_CODE", "WEEK_START_DATE"], as_index=False)["ordered_flag"]
+# 3) Collapse to customer-week: did customer interact that week?
+cust_week = (
+    df_6m.groupby(["CUSTOMER_EXTERNAL_CODE", "WEEK_START_DATE"], as_index=False)["interaction_flag"]
         .max()
 )
 
-# 4) Count number of distinct ordering weeks per customer
-cust_order_weeks = (
-    cust_week_ordered.groupby("CUSTOMER_EXTERNAL_CODE", as_index=False)["ordered_flag"]
+# 4) Count interaction weeks per customer in last 6 months
+cust_interactions = (
+    cust_week.groupby("CUSTOMER_EXTERNAL_CODE", as_index=False)["interaction_flag"]
         .sum()
-        .rename(columns={"ordered_flag": "num_order_weeks_6m"})
+        .rename(columns={"interaction_flag": "num_interaction_weeks_6m"})
 )
 
-# 5) Keep customers who ordered exactly once in the last 6 months
-one_time_customers = cust_order_weeks[cust_order_weeks["num_order_weeks_6m"] == 1][["CUSTOMER_EXTERNAL_CODE"]]
-logging.info(f"Customers with exactly one ordering week in last 6 months: {len(one_time_customers)}")
+# 5) Identify customers with ≤6 interaction weeks
+threshold = 6
+low_interaction_customers = cust_interactions[cust_interactions["num_interaction_weeks_6m"] <= threshold].copy()
 
-# 6) Identify the exact week of order for those customers
-one_time_weeks = (
-    cust_week_ordered.merge(one_time_customers, on="CUSTOMER_EXTERNAL_CODE", how="inner")
-                    .query("ordered_flag == 1")[["CUSTOMER_EXTERNAL_CODE", "WEEK_START_DATE"]]
+# 6) Compute denominator: customers active at least once in last 6 months
+active_customers_6m = cust_interactions[cust_interactions["num_interaction_weeks_6m"] > 0]
+num_active = len(active_customers_6m)
+num_low = len(low_interaction_customers)
+pct_low = (num_low / num_active * 100.0) if num_active > 0 else np.nan
+
+logging.info(f"Active customers (≥1 interaction week in 6M): {num_active:,}")
+logging.info(f"Customers with ≤{threshold} interaction weeks in 6M: {num_low:,} ({pct_low:.2f}%)")
+
+# 7) Create summary table
+summary_table = (
+    low_interaction_customers
+    .merge(df_6m[["CUSTOMER_EXTERNAL_CODE"]].drop_duplicates(), on="CUSTOMER_EXTERNAL_CODE", how="left")
+    .sort_values("num_interaction_weeks_6m")
+    .reset_index(drop=True)
 )
 
-# 7) Retrieve transactional rows for their single-order week (all SKUs that week)
-one_time_orders_rows = (
-    df_6m.merge(one_time_weeks, on=["CUSTOMER_EXTERNAL_CODE", "WEEK_START_DATE"], how="inner")
-         .copy()
+# 8) Optional: add first/last interaction week and contribution
+first_last = (
+    cust_week[cust_week["interaction_flag"] == 1]
+    .groupby("CUSTOMER_EXTERNAL_CODE")
+    .agg(first_interaction=("WEEK_START_DATE", "min"),
+         last_interaction=("WEEK_START_DATE", "max"))
+    .reset_index()
 )
 
-# 8) Optional: customer-level summary (value and qty in that single order week)
-one_time_summary = (
-    one_time_orders_rows.groupby(["CUSTOMER_EXTERNAL_CODE", "WEEK_START_DATE"], as_index=False)
-        .agg(
-            total_qty=("TOTAL_QUANTITY", "sum"),
-            total_value=("TOTAL_DLP_VALUE", "sum"),
-            total_base=("TOTAL_BASE_PRICE", "sum"),
-            num_skus=("SKU_ERP_CODE", "nunique")
-        )
-        .sort_values(["WEEK_START_DATE", "CUSTOMER_EXTERNAL_CODE"])
+summary_table = summary_table.merge(first_last, on="CUSTOMER_EXTERNAL_CODE", how="left")
+
+# 9) Optional: contribution of these customers in 6M window
+contrib = (
+    df_6m.merge(low_interaction_customers[["CUSTOMER_EXTERNAL_CODE"]], on="CUSTOMER_EXTERNAL_CODE", how="inner")
+         .groupby("CUSTOMER_EXTERNAL_CODE", as_index=False)
+         .agg(total_qty_6m=("TOTAL_QUANTITY", "sum"),
+              total_value_6m=("TOTAL_DLP_VALUE", "sum"),
+              active_weeks_6m=("WEEK_START_DATE", "nunique"))
 )
 
-# 9) Save results
-one_time_customers.to_csv("customers_one_time_6m.csv", index=False)
-one_time_weeks.to_csv("customers_one_time_6m_weeks.csv", index=False)
-one_time_orders_rows.to_csv("customers_one_time_6m_order_rows.csv", index=False)
-one_time_summary.to_csv("customers_one_time_6m_summary.csv", index=False)
+summary_table = summary_table.merge(contrib, on="CUSTOMER_EXTERNAL_CODE", how="left")
 
-# 10) Display quick overviews
-display(one_time_summary.head(20))
-display(one_time_customers.head(20))
+# 10) Display key outputs
+display(summary_table.head(20))
+print(f"Customers with ≤{threshold} interaction weeks in last 6 months: {num_low:,} of {num_active:,} active customers ({pct_low:.2f}%)")
 
+# 11) Save artifacts
+summary_table.to_csv(f"customers_le_{threshold}_weeks_in_6m_summary.csv", index=False)
+pd.DataFrame({"metric": ["active_customers_6m", f"le_{threshold}_weeks_customers", "percentage_le_threshold"],
+              "value": [num_active, num_low, round(pct_low, 2)]}).to_csv("customers_le_6_weeks_6m_stats.csv", index=False)
