@@ -72,6 +72,20 @@ final_df = final_df[final_df['DISPATCH_MONTH'] >= start_date].copy()
 # Sort by BIKE_GROUPED and DISPATCH_MONTH
 final_df = final_df.sort_values(['BIKE_GROUPED', 'DISPATCH_MONTH']).reset_index(drop=True)
 
+# Calculate historical cumulative columns
+final_df['HISTORICAL_VOLUME'] = final_df.groupby('BIKE_GROUPED')['VOLUME'].cumsum()
+final_df['HISTORICAL_TOTAL_COST'] = final_df.groupby('BIKE_GROUPED')['TOTAL_WARRANTY_COST'].cumsum()
+final_df['HISTORICAL_ACTUAL_COST'] = final_df.groupby('BIKE_GROUPED')['ACTUAL_COSTING'].cumsum()
+final_df['HISTORICAL_PRED_COST'] = final_df.groupby('BIKE_GROUPED')['PRED_COSTING'].cumsum()
+
+# Calculate historical per unit costs
+final_df['HISTORICAL_TOTAL_COST_PER_UNIT'] = final_df['HISTORICAL_TOTAL_COST'] / final_df['HISTORICAL_VOLUME']
+final_df['HISTORICAL_ACTUAL_COST_PER_UNIT'] = final_df['HISTORICAL_ACTUAL_COST'] / final_df['HISTORICAL_VOLUME']
+final_df['HISTORICAL_PRED_COST_PER_UNIT'] = final_df['HISTORICAL_PRED_COST'] / final_df['HISTORICAL_VOLUME']
+
+# Replace inf values with 0 (in case of division by zero)
+final_df.replace([np.inf, -np.inf], 0, inplace=True)
+
 # Select and order columns
 final_df = final_df[[
     'DISPATCH_MONTH',
@@ -83,11 +97,18 @@ final_df = final_df[[
     'ACTUAL_COSTING_PER_UNIT',
     'PRED_COSTING',
     'PRED_COSTING_PER_UNIT',
+    'HISTORICAL_VOLUME',
+    'HISTORICAL_TOTAL_COST',
+    'HISTORICAL_TOTAL_COST_PER_UNIT',
+    'HISTORICAL_ACTUAL_COST',
+    'HISTORICAL_ACTUAL_COST_PER_UNIT',
+    'HISTORICAL_PRED_COST',
+    'HISTORICAL_PRED_COST_PER_UNIT',
     'BIKE_GROUPED'
 ]]
 
-# Format DISPATCH_MONTH for better readability
-final_df['DISPATCH_MONTH'] = final_df['DISPATCH_MONTH'].dt.strftime('%Y-%m-%d')
+# Format DISPATCH_MONTH as mm-yyyy
+final_df['DISPATCH_MONTH'] = final_df['DISPATCH_MONTH'].dt.strftime('%m-%Y')
 
 # Get unique bike groups
 bike_groups = final_df['BIKE_GROUPED'].unique()
