@@ -179,3 +179,49 @@ status_pivot = status_dist.pivot_table(
 ).reset_index()
 
 print(status_pivot.to_string(index=False))
+
+
+
+
+
+
+
+
+
+
+Warranty Analysis - Variable Descriptions
+
+DISPATCH_MONTH - The month and year when bike units were dispatched from the plant, formatted as mm-YYYY (e.g., 01-2015). This represents the cohort date for tracking warranty performance.
+
+VOLUME - The total number of bike units dispatched in the corresponding dispatch month for the specific bike model.
+
+TOTAL_WARRANTY_COST - The complete warranty cost for units dispatched in the given month, combining both actual costs incurred and predicted future costs (Actual Costing + Predicted Costing).
+
+TOTAL_COST_PER_UNIT - The average total warranty cost per bike unit for the dispatch cohort, calculated as Total Warranty Cost divided by Volume.
+
+INCOMPLETE_COMPLETE_WARRANTY - Indicates whether the warranty period has fully matured ("COMPLETE") or is still ongoing with predicted costs ("INCOMPLETE").
+
+ACTUAL_COSTING - Warranty costs that have actually been incurred and recorded to date for units dispatched in the given month (WARRANTY_COST_TYPE = 'Actual').
+
+ACTUAL_COSTING_PER_UNIT - The average actual warranty cost per unit for the dispatch cohort, calculated as Actual Costing divided by Volume.
+
+PRED_COSTING - Estimated future warranty costs for units dispatched in the given month based on predictive models (WARRANTY_COST_TYPE = 'Predicted').
+
+PRED_COSTING_PER_UNIT - The average predicted warranty cost per unit for the dispatch cohort, calculated as Predicted Costing divided by Volume.
+
+HISTORICAL_VOLUME - Cumulative sum of all bike units dispatched from the beginning of the analysis period up to and including the current dispatch month for the specific bike model.
+
+HISTORICAL_TOTAL_COST - Cumulative sum of all total warranty costs (actual + predicted) from the beginning of the analysis period up to and including the current dispatch month.
+
+HISTORICAL_TOTAL_COST_PER_UNIT - The average warranty cost per unit on a cumulative basis, calculated as Historical Total Cost divided by Historical Volume, representing lifetime average warranty cost.
+
+HISTORICAL_ACTUAL_COST - Cumulative sum of all actual warranty costs incurred from the beginning of the analysis period up to and including the current dispatch month.
+
+HISTORICAL_ACTUAL_COST_PER_UNIT - The average actual warranty cost per unit on a cumulative basis, calculated as Historical Actual Cost divided by Historical Volume.
+
+HISTORICAL_PRED_COST - Cumulative sum of all predicted warranty costs from the beginning of the analysis period up to and including the current dispatch month.
+
+HISTORICAL_PRED_COST_PER_UNIT - The average predicted warranty cost per unit on a cumulative basis, calculated as Historical Predicted Cost divided by Historical Volume.
+
+Analysis Period: January 2015 onwards (or first available data)
+Data Sources: preprocessed.xlsx, dispatch_agg.xlsx
