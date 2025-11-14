@@ -4,145 +4,157 @@ from datetime import datetime
 
 # Load the data files
 preprocessed_df = pd.read_excel('preprocessed.xlsx')
-dispatch_df = pd.read_excel('Monthly Dispatch Data.xlsx')
+dispatch_agg = pd.read_excel('dispatch_agg.xlsx')  # Assuming this is your dispatch file name
 
 # Convert date columns to datetime
 preprocessed_df['DISPATCH_MONTH'] = pd.to_datetime(preprocessed_df['DISPATCH_MONTH'])
 preprocessed_df['WARRANTY_MONTH'] = pd.to_datetime(preprocessed_df['WARRANTY_MONTH'])
-dispatch_df['DISPATCH_MONTH'] = pd.to_datetime(dispatch_df['DISPATCH_MONTH'])
+dispatch_agg['DISPATCH_MONTH'] = pd.to_datetime(dispatch_agg['DISPATCH_MONTH'])
 
-# Filter data from Jan 2018 to June 2020 for lifecycle analysis
-start_date = '2018-01-01'
-end_date = '2020-06-30'
-
-preprocessed_filtered = preprocessed_df[
-    (preprocessed_df['DISPATCH_MONTH'] >= start_date) & 
-    (preprocessed_df['DISPATCH_MONTH'] <= end_date)
-].copy()
-
-dispatch_filtered = dispatch_df[
-    (dispatch_df['DISPATCH_MONTH'] >= start_date) & 
-    (dispatch_df['DISPATCH_MONTH'] <= end_date)
-].copy()
-
-# Aggregate warranty costs by BIKE_GROUPED and DISPATCH_MONTH
-warranty_agg = preprocessed_filtered.groupby(['BIKE_GROUPED', 'DISPATCH_MONTH']).agg({
+# Group warranty costs by BIKE_GROUPED, DISPATCH_MONTH, and WARRANTY_COST_TYPE
+warranty_summary = preprocessed_df.groupby(
+    ['BIKE_GROUPED', 'DISPATCH_MONTH', 'WARRANTY_COST_TYPE']
+).agg({
     'WARRANTY_COST': 'sum'
 }).reset_index()
 
-# Aggregate dispatch volumes by MODEL_GROUPED and DISPATCH_MONTH
-dispatch_agg = dispatch_filtered.groupby(['MODEL_GROUPED', 'DISPATCH_MONTH']).agg({
-    'VOLUME': 'sum'
-}).reset_index()
+# Pivot to get Actual and Predicted costs in separate columns
+warranty_pivot = warranty_summary.pivot_table(
+    index=['BIKE_GROUPED', 'DISPATCH_MONTH'],
+    columns='WARRANTY_COST_TYPE',
+    values='WARRANTY_COST',
+    fill_value=0
+).reset_index()
 
-# Rename MODEL_GROUPED to BIKE_GROUPED for merging
-dispatch_agg.rename(columns={'MODEL_GROUPED': 'BIKE_GROUPED'}, inplace=True)
+# Rename columns
+warranty_pivot.columns.name = None
+if 'Actual' in warranty_pivot.columns:
+    warranty_pivot.rename(columns={'Actual': 'ACTUAL_COSTING'}, inplace=True)
+else:
+    warranty_pivot['ACTUAL_COSTING'] = 0
 
-# Generate analysis months from July 2019 to June 2020
-analysis_start = pd.to_datetime('2019-07-01')
-analysis_end = pd.to_datetime('2020-06-30')
-analysis_months = pd.date_range(start=analysis_start, end=analysis_end, freq='MS')
+if 'Predicted' in warranty_pivot.columns:
+    warranty_pivot.rename(columns={'Predicted': 'PRED_COSTING'}, inplace=True)
+else:
+    warranty_pivot['PRED_COSTING'] = 0
 
-# Initialize results list
-results = []
+# Merge with dispatch volume data
+final_df = pd.merge(
+    dispatch_agg[['BIKE_GROUPED', 'DISPATCH_MONTH', 'VOLUME']],
+    warranty_pivot,
+    on=['BIKE_GROUPED', 'DISPATCH_MONTH'],
+    how='left'
+)
 
-# For each analysis month, calculate lifecycle cost using historical data
-for current_month in analysis_months:
-    # Define historical period: 12 months prior to current month
-    hist_start = current_month - pd.DateOffset(months=12)
-    
-    # Filter historical warranty data (dispatch dates before current month)
-    hist_warranty = warranty_agg[warranty_agg['DISPATCH_MONTH'] < current_month].copy()
-    
-    # Filter historical dispatch data (dispatch dates before current month)
-    hist_dispatch = dispatch_agg[dispatch_agg['DISPATCH_MONTH'] < current_month].copy()
-    
-    # Calculate total lifecycle warranty cost for each bike model
-    lifecycle_cost = hist_warranty.groupby('BIKE_GROUPED').agg({
-        'WARRANTY_COST': 'sum'
-    }).reset_index()
-    lifecycle_cost.rename(columns={'WARRANTY_COST': 'TOTAL_LIFECYCLE_COST'}, inplace=True)
-    
-    # Calculate total volume dispatched for each bike model
-    total_volume = hist_dispatch.groupby('BIKE_GROUPED').agg({
-        'VOLUME': 'sum'
-    }).reset_index()
-    total_volume.rename(columns={'VOLUME': 'TOTAL_VOLUME_DISPATCHED'}, inplace=True)
-    
-    # Merge lifecycle cost with volume
-    monthly_analysis = pd.merge(lifecycle_cost, total_volume, on='BIKE_GROUPED', how='outer')
-    
-    # Calculate lifecycle cost per unit
-    monthly_analysis['LIFECYCLE_COST_PER_UNIT'] = (
-        monthly_analysis['TOTAL_LIFECYCLE_COST'] / monthly_analysis['TOTAL_VOLUME_DISPATCHED']
-    )
-    
-    # Add analysis month information
-    monthly_analysis['ANALYSIS_MONTH'] = current_month
-    
-    # Calculate overall lifecycle cost across all models
-    overall_total_cost = monthly_analysis['TOTAL_LIFECYCLE_COST'].sum()
-    overall_total_volume = monthly_analysis['TOTAL_VOLUME_DISPATCHED'].sum()
-    overall_cost_per_unit = overall_total_cost / overall_total_volume if overall_total_volume > 0 else 0
-    
-    # Add summary row
-    summary_row = pd.DataFrame([{
-        'BIKE_GROUPED': 'OVERALL',
-        'TOTAL_LIFECYCLE_COST': overall_total_cost,
-        'TOTAL_VOLUME_DISPATCHED': overall_total_volume,
-        'LIFECYCLE_COST_PER_UNIT': overall_cost_per_unit,
-        'ANALYSIS_MONTH': current_month
-    }])
-    
-    monthly_analysis = pd.concat([monthly_analysis, summary_row], ignore_index=True)
-    
-    results.append(monthly_analysis)
+# Fill NaN values with 0 for warranty costs
+final_df['ACTUAL_COSTING'] = final_df['ACTUAL_COSTING'].fillna(0)
+final_df['PRED_COSTING'] = final_df['PRED_COSTING'].fillna(0)
 
-# Combine all results
-final_results = pd.concat(results, ignore_index=True)
+# Calculate required fields
+final_df['TOTAL_WARRANTY_COST'] = final_df['ACTUAL_COSTING'] + final_df['PRED_COSTING']
+final_df['TOTAL_COST_PER_UNIT'] = final_df['TOTAL_WARRANTY_COST'] / final_df['VOLUME']
+final_df['ACTUAL_COSTING_PER_UNIT'] = final_df['ACTUAL_COSTING'] / final_df['VOLUME']
+final_df['PRED_COSTING_PER_UNIT'] = final_df['PRED_COSTING'] / final_df['VOLUME']
 
-# Sort by analysis month and bike model
-final_results = final_results.sort_values(['ANALYSIS_MONTH', 'BIKE_GROUPED']).reset_index(drop=True)
+# Determine if warranty is Complete or Incomplete
+final_df['INCOMPLETE_COMPLETE_WARRANTY'] = final_df.apply(
+    lambda row: 'INCOMPLETE' if row['PRED_COSTING'] > 0 else 'COMPLETE',
+    axis=1
+)
 
-# Format the output
-final_results['ANALYSIS_MONTH'] = final_results['ANALYSIS_MONTH'].dt.strftime('%Y-%m')
+# Replace inf values with 0 (in case of division by zero)
+final_df.replace([np.inf, -np.inf], 0, inplace=True)
 
-# Display summary statistics
-print("=" * 80)
-print("WARRANTY LIFECYCLE COST ANALYSIS")
-print("Analysis Period: July 2019 to June 2020")
-print("Historical Data: January 2018 to Current Analysis Month")
-print("=" * 80)
-print("
-")
+# Filter data starting from 2015-01-01
+start_date = pd.to_datetime('2015-01-01')
+final_df = final_df[final_df['DISPATCH_MONTH'] >= start_date].copy()
 
-# Show overall trends
-overall_trends = final_results[final_results['BIKE_GROUPED'] == 'OVERALL'][
-    ['ANALYSIS_MONTH', 'TOTAL_LIFECYCLE_COST', 'TOTAL_VOLUME_DISPATCHED', 'LIFECYCLE_COST_PER_UNIT']
-]
-print("Overall Lifecycle Cost Trends:")
-print(overall_trends.to_string(index=False))
-print("
-")
+# Sort by BIKE_GROUPED and DISPATCH_MONTH
+final_df = final_df.sort_values(['BIKE_GROUPED', 'DISPATCH_MONTH']).reset_index(drop=True)
 
-# Show sample of detailed results
-print("Sample Detailed Results (First 20 rows):")
-print(final_results.head(20).to_string(index=False))
+# Select and order columns
+final_df = final_df[[
+    'DISPATCH_MONTH',
+    'VOLUME',
+    'TOTAL_WARRANTY_COST',
+    'TOTAL_COST_PER_UNIT',
+    'INCOMPLETE_COMPLETE_WARRANTY',
+    'ACTUAL_COSTING',
+    'ACTUAL_COSTING_PER_UNIT',
+    'PRED_COSTING',
+    'PRED_COSTING_PER_UNIT',
+    'BIKE_GROUPED'
+]]
 
-# Save results to Excel
-output_filename = 'Warranty_Lifecycle_Cost_Analysis.xlsx'
-with pd.ExcelWriter(output_filename, engine='openpyxl') as writer:
-    final_results.to_excel(writer, sheet_name='Lifecycle_Cost_Analysis', index=False)
-    overall_trends.to_excel(writer, sheet_name='Overall_Trends', index=False)
+# Format DISPATCH_MONTH for better readability
+final_df['DISPATCH_MONTH'] = final_df['DISPATCH_MONTH'].dt.strftime('%Y-%m-%d')
+
+# Get unique bike groups
+bike_groups = final_df['BIKE_GROUPED'].unique()
+
+# Create Excel writer object
+output_filename = 'Warranty_Analysis_By_Bike.xlsx'
+writer = pd.ExcelWriter(output_filename, engine='openpyxl')
+
+# Write each bike group to a separate sheet
+for bike_group in bike_groups:
+    # Filter data for current bike group
+    bike_df = final_df[final_df['BIKE_GROUPED'] == bike_group].copy()
+    
+    # Drop BIKE_GROUPED column as it's redundant in individual sheets
+    bike_df = bike_df.drop('BIKE_GROUPED', axis=1)
+    
+    # Create valid sheet name (Excel has 31 char limit and some special chars are not allowed)
+    sheet_name = str(bike_group)[:31]
+    sheet_name = sheet_name.replace('/', '_').replace('\\', '_').replace('*', '_').replace('?', '_').replace('[', '_').replace(']', '_')
+    
+    # Write to Excel
+    bike_df.to_excel(writer, sheet_name=sheet_name, index=False)
+    
+    print(f"Sheet created for: {bike_group} (Rows: {len(bike_df)})")
+
+# Create a summary sheet with all data
+final_df.to_excel(writer, sheet_name='All_Data', index=False)
+print(f"
+Summary sheet 'All_Data' created with {len(final_df)} rows")
+
+# Save and close the writer
+writer.close()
 
 print(f"
-Results saved to: {output_filename}")
+✓ Analysis complete! File saved as: {output_filename}")
+print(f"✓ Total sheets created: {len(bike_groups) + 1} ({len(bike_groups)} bike groups + 1 summary)")
 
-# Additional analysis: Calculate month-over-month changes
-overall_trends['LIFECYCLE_COST_PER_UNIT'] = pd.to_numeric(overall_trends['LIFECYCLE_COST_PER_UNIT'])
-overall_trends['MOM_CHANGE'] = overall_trends['LIFECYCLE_COST_PER_UNIT'].pct_change() * 100
-
+# Display summary statistics
 print("
-")
-print("Month-over-Month Change in Lifecycle Cost Per Unit:")
-print(overall_trends[['ANALYSIS_MONTH', 'LIFECYCLE_COST_PER_UNIT', 'MOM_CHANGE']].to_string(index=False))
+" + "="*80)
+print("SUMMARY STATISTICS BY BIKE GROUP")
+print("="*80)
+
+summary_stats = final_df.groupby('BIKE_GROUPED').agg({
+    'VOLUME': 'sum',
+    'TOTAL_WARRANTY_COST': 'sum',
+    'ACTUAL_COSTING': 'sum',
+    'PRED_COSTING': 'sum'
+}).reset_index()
+
+summary_stats['AVG_COST_PER_UNIT'] = summary_stats['TOTAL_WARRANTY_COST'] / summary_stats['VOLUME']
+summary_stats = summary_stats.round(2)
+
+print(summary_stats.to_string(index=False))
+
+# Count incomplete vs complete warranties
+print("
+" + "="*80)
+print("WARRANTY STATUS DISTRIBUTION")
+print("="*80)
+
+status_dist = final_df.groupby(['BIKE_GROUPED', 'INCOMPLETE_COMPLETE_WARRANTY']).size().reset_index(name='COUNT')
+status_pivot = status_dist.pivot_table(
+    index='BIKE_GROUPED',
+    columns='INCOMPLETE_COMPLETE_WARRANTY',
+    values='COUNT',
+    fill_value=0
+).reset_index()
+
+print(status_pivot.to_string(index=False))
