@@ -1,0 +1,261 @@
+# =============================================================================
+# Weekly Demand Feature Engineering (Leakage-safe for week W -> uses up to W-1)
+# Columns expected:
+#   CUSTOMER_EXTERNAL_CODE, SKU_ERP_CODE, WEEK_START_DATE, WEEK_END_DATE,
+#   ORDER_IDS (comma-separated), ORDER_DATES (comma-separated),
+#   BASE_PRICE (per-unit), TOTAL_QUANTITY, TOTAL_DLP_VALUE
+# =============================================================================
+
+import pandas as pd
+import numpy as np
+import logging
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
+
+# -------------------------
+# 0) Config and base prep
+# -------------------------
+GROUP_KEYS = ["CUSTOMER_EXTERNAL_CODE", "SKU_ERP_CODE"]
+DATE_COL = "WEEK_START_DATE"
+TARGET = "TOTAL_QUANTITY"
+PRICE_PER_UNIT_COL = "BASE_PRICE"       # per-unit base price at week level
+VALUE_COL = "TOTAL_DLP_VALUE"
+
+df = df.copy()
+df[DATE_COL] = pd.to_datetime(df[DATE_COL], errors="coerce")
+df["WEEK_END_DATE"] = pd.to_datetime(df["WEEK_END_DATE"], errors="coerce")
+df = df.sort_values(GROUP_KEYS + [DATE_COL]).reset_index(drop=True)
+
+# Defensive typing
+for c in [TARGET, VALUE_COL, PRICE_PER_UNIT_COL]:
+    df[c] = pd.to_numeric(df[c], errors="coerce")
+
+# Derive unit DLP price proxy if quantity > 0
+df["UNIT_DLP_PRICE"] = np.where(df[TARGET] > 0, df[VALUE_COL] / df[TARGET], np.nan)
+
+# -------------------------
+# 1) Temporal features (calendar; no leakage)
+# -------------------------
+iso = df[DATE_COL].dt.isocalendar()
+df["YEAR"] = iso.year.astype("int16")
+df["WEEK"] = iso.week.astype("int16")
+df["MONTH"] = df[DATE_COL].dt.month.astype("int8")
+df["QUARTER"] = df[DATE_COL].dt.quarter.astype("int8")
+df["DOW"] = df[DATE_COL].dt.dayofweek.astype("int8")        # Monday=0
+df["IS_WEEKEND"] = (df["DOW"] >= 5).astype("int8")          # informational on weekly grain
+
+# Cyclic encodings
+df["WEEK_SIN"] = np.sin(2*np.pi*df["WEEK"]/52.0)
+df["WEEK_COS"] = np.cos(2*np.pi*df["WEEK"]/52.0)
+df["MONTH_SIN"] = np.sin(2*np.pi*df["MONTH"]/12.0)
+df["MONTH_COS"] = np.cos(2*np.pi*df["MONTH"]/12.0)
+
+# Customer tenure: weeks since first nonzero purchase
+first_nonzero = (
+    df[df[TARGET] > 0]
+    .groupby(GROUP_KEYS)[DATE_COL].min()
+    .rename("FIRST_NONZERO_WEEK")
+)
+df = df.merge(first_nonzero, on=GROUP_KEYS, how="left")
+df["TENURE_WEEKS"] = ((df[DATE_COL] - df["FIRST_NONZERO_WEEK"]).dt.days // 7).astype("float32")
+df["TENURE_WEEKS"] = df["TENURE_WEEKS"].fillna(-1).astype("float32")
+
+# -------------------------
+# 2) Order-density features from ORDER_IDS / ORDER_DATES
+# -------------------------
+# Convert comma-separated lists to counts for this weekly grain
+def safe_count_comma_list(x):
+    if pd.isna(x) or str(x).strip() == "":
+        return 0
+    return len([t for t in str(x).split(",") if t.strip() != ""])
+
+df["NUM_ORDERS_WEEK"] = df["ORDER_IDS"].apply(safe_count_comma_list).astype("int16")
+
+# Order-day dispersion within the week (unique order dates count)
+def unique_dates_count(x):
+    if pd.isna(x) or str(x).strip() == "":
+        return 0
+    vals = [s.strip() for s in str(x).split(",") if s.strip() != ""]
+    try:
+        dates = pd.to_datetime(vals, errors="coerce")
+        return dates.dropna().nunique()
+    except Exception:
+        return len(set(vals))
+
+df["NUM_ORDER_DAYS_WEEK"] = df["ORDER_DATES"].apply(unique_dates_count).astype("int16")
+
+# Normalize per-quantity: orders per unit (if available)
+df["ORDERS_PER_UNIT"] = np.where(df[TARGET] > 0, df["NUM_ORDERS_WEEK"] / df[TARGET], np.nan)
+
+# -------------------------
+# 3) Core lag features (shift to enforce W uses up to W-1)
+# -------------------------
+def add_lags(g, col, lags):
+    for L in lags:
+        g[f"{col}_lag{L}"] = g[col].shift(L)
+    return g
+
+LAGS_QTY = [1, 2, 3, 4, 8, 12, 26, 52]
+LAGS_PRICE = [1, 4, 12]
+LAGS_ORDERS = [1, 4, 12]
+
+df = df.groupby(GROUP_KEYS, group_keys=False).apply(add_lags, col=TARGET, lags=LAGS_QTY)
+df = df.groupby(GROUP_KEYS, group_keys=False).apply(add_lags, col="UNIT_DLP_PRICE", lags=LAGS_PRICE)
+df = df.groupby(GROUP_KEYS, group_keys=False).apply(add_lags, col="NUM_ORDERS_WEEK", lags=LAGS_ORDERS)
+
+# -------------------------
+# 4) Rolling statistics (shifted by 1 to avoid leakage)
+# -------------------------
+def add_rolls(g, col, windows):
+    s = g[col].shift(1)
+    for w in windows:
+        g[f"{col}_rollmean_{w}"] = s.rolling(window=w, min_periods=1).mean()
+        g[f"{col}_rollstd_{w}"]  = s.rolling(window=w, min_periods=2).std()
+        g[f"{col}_rollmin_{w}"]  = s.rolling(window=w, min_periods=1).min()
+        g[f"{col}_rollmax_{w}"]  = s.rolling(window=w, min_periods=1).max()
+        g[f"{col}_rollsum_{w}"]  = s.rolling(window=w, min_periods=1).sum()
+    return g
+
+ROLL_W = [4, 8, 12, 26, 52]
+df = df.groupby(GROUP_KEYS, group_keys=False).apply(add_rolls, col=TARGET, windows=ROLL_W)
+df = df.groupby(GROUP_KEYS, group_keys=False).apply(add_rolls, col="UNIT_DLP_PRICE", windows=[4, 12, 26])
+df = df.groupby(GROUP_KEYS, group_keys=False).apply(add_rolls, col="NUM_ORDERS_WEEK", windows=[4, 12, 26])
+
+# -------------------------
+# 5) Exponentially weighted stats (shifted series)
+# -------------------------
+def add_ewm(g, col, halflife_list):
+    s = g[col].shift(1)
+    for h in halflife_list:
+        g[f"{col}_ewm_mean_h{h}"] = s.ewm(halflife=h, min_periods=1, adjust=False).mean()
+        g[f"{col}_ewm_std_h{h}"]  = s.ewm(halflife=h, min_periods=10, adjust=False).std()
+    return g
+
+df = df.groupby(GROUP_KEYS, group_keys=False).apply(add_ewm, col=TARGET, halflife_list=[2, 4, 8, 12, 26])
+
+# -------------------------
+# 6) Trend & seasonality change rates (past-only)
+# -------------------------
+def add_trend_rates(g, col):
+    s = g[col].shift(1)
+    short = s.rolling(4, min_periods=1).mean()
+    long  = s.rolling(12, min_periods=1).mean()
+    g[f"{col}_trend_delta_4v12"] = (short - long)
+    g[f"{col}_trend_rate_4v12"]  = np.where((np.abs(long) > 1e-9), (short - long) / (np.abs(long) + 1e-9), 0.0)
+    # YoY rate with lag-52 reference
+    g[f"{col}_yoy_rate"] = (g[f"{col}_lag1"] - g.get(f"{col}_lag52")) / (np.abs(g.get(f"{col}_lag52")) + 1e-9)
+    return g
+
+df = df.groupby(GROUP_KEYS, group_keys=False).apply(add_trend_rates, col=TARGET)
+
+# Week-of-year seasonal baseline per entity (expanding mean up to W-1)
+def add_woy_baseline(g):
+    woy = g[DATE_COL].dt.isocalendar().week.astype(int)
+    g["_WOY"] = woy
+    g["woy_baseline_qty"] = (
+        g.groupby("_WOY")[TARGET]
+         .apply(lambda s: s.shift(1).expanding(min_periods=4).mean())
+         .reset_index(level=0, drop=True)
+    )
+    g["qty_vs_woy_baseline"] = (g[TARGET].shift(1) - g["woy_baseline_qty"])
+    return g
+
+df = df.groupby(GROUP_KEYS, group_keys=False).apply(add_woy_baseline)
+df.drop(columns=["_WOY"], inplace=True, errors="ignore")
+
+# -------------------------
+# 7) Intermittency & activity features (past-only)
+# -------------------------
+def add_intermittency(g):
+    nz = (g[TARGET].shift(1).fillna(0) > 0).astype(int)
+    g["nonzero_ratio_12"] = nz.rolling(12, min_periods=1).mean().astype("float32")
+    # weeks since last nonzero (reverse cumcount trick)
+    g["weeks_since_nonzero"] = (nz[::-1].groupby((nz == 1)[::-1].cumsum()).cumcount())[::-1].astype("float32")
+    g["weeks_since_nonzero"] = g["weeks_since_nonzero"].clip(upper=1e3)
+    return g
+
+df = df.groupby(GROUP_KEYS, group_keys=False).apply(add_intermittency)
+
+# -------------------------
+# 8) Price dynamics (past-only)
+# -------------------------
+def add_price_dynamics(g, price_col):
+    p = g[price_col]
+    g[f"{price_col}_pctchg_1"] = p.pct_change().shift(1)
+    g[f"{price_col}_pctchg_4"] = p.pct_change(4).shift(1)
+    med4 = p.shift(1).rolling(4, min_periods=1).median()
+    g[f"{price_col}_rel_to_med4"] = (p.shift(1) - med4) / (np.abs(med4) + 1e-9)
+    return g
+
+# Use UNIT_DLP_PRICE for realized price signal; BASE_PRICE for list price signal
+df = df.groupby(GROUP_KEYS, group_keys=False).apply(add_price_dynamics, price_col="UNIT_DLP_PRICE")
+df = df.groupby(GROUP_KEYS, group_keys=False).apply(add_price_dynamics, price_col=PRICE_PER_UNIT_COL)
+
+# Price dispersion within entity (using rolling std of realized unit price)
+df["unit_price_disp_12"] = df.groupby(GROUP_KEYS)["UNIT_DLP_PRICE"].apply(
+    lambda s: s.shift(1).rolling(12, min_periods=3).std()
+).values
+
+# -------------------------
+# 9) Global context features (SKU-level and Customer-level baselines)
+# -------------------------
+# SKU-level last 12-week average up to W-1
+sku_roll = (
+    df.groupby(["SKU_ERP_CODE", DATE_COL])[TARGET].sum()
+      .groupby(level=0).shift(1).rolling(12, min_periods=1).mean()
+      .rename("SKU_rollmean12")
+      .reset_index()
+)
+df = df.merge(sku_roll, on=["SKU_ERP_CODE", DATE_COL], how="left")
+
+# Customer-level last 12-week average up to W-1
+cust_roll = (
+    df.groupby(["CUSTOMER_EXTERNAL_CODE", DATE_COL])[TARGET].sum()
+      .groupby(level=0).shift(1).rolling(12, min_periods=1).mean()
+      .rename("CUST_rollmean12")
+      .reset_index()
+)
+df = df.merge(cust_roll, on=["CUSTOMER_EXTERNAL_CODE", DATE_COL], how="left")
+
+# -------------------------
+# 10) Targets and hygiene
+# -------------------------
+df["y"] = df[TARGET].astype("float32")
+df["y_log1p"] = np.log1p(df[TARGET].clip(min=0)).astype("float32")
+
+# Cast identifiers to category to reduce memory
+df["CUSTOMER_EXTERNAL_CODE"] = df["CUSTOMER_EXTERNAL_CODE"].astype("category")
+df["SKU_ERP_CODE"] = df["SKU_ERP_CODE"].astype("category")
+
+# Replace inf, keep NaNs (models like LGBM can handle or you can impute)
+num_cols = df.select_dtypes(include=[np.number]).columns
+df[num_cols] = df[num_cols].replace([np.inf, -np.inf], np.nan)
+
+# Optional local imputation for engineered features while preserving lags NaN
+engineered = [c for c in num_cols if c not in {TARGET, "y", "y_log1p"}]
+df[engineered] = df.groupby(GROUP_KEYS)[engineered].apply(
+    lambda g: g.fillna(method="ffill")
+).reset_index(level=GROUP_KEYS, drop=True)
+# Remaining NaNs -> 0 for safe tree models (avoid for linear)
+df[engineered] = df[engineered].fillna(0)
+
+# -------------------------
+# 11) Time-based split (example)
+# -------------------------
+N_VALID_WEEKS = 8
+max_week = df[DATE_COL].max()
+val_start = max_week - pd.to_timedelta(7 * (N_VALID_WEEKS - 1), unit="D")
+df["SPLIT"] = np.where(df[DATE_COL] >= val_start, "VALID", "TRAIN")
+
+# -------------------------
+# 12) Feature list
+# -------------------------
+exclude = {TARGET, "y", "y_log1p", DATE_COL, "WEEK_END_DATE", "FIRST_NONZERO_WEEK", "SPLIT"}
+exclude |= set(GROUP_KEYS)
+feature_cols = [c for c in df.columns if c not in exclude]
+
+logging.info(f"Final feature count: {len(feature_cols)}")
+display(df[GROUP_KEYS + [DATE_COL, TARGET, "y_log1p", "SPLIT"] + feature_cols[:15]].head(20))
+
+# Save
+df.to_parquet("weekly_features_ready.parquet", index=False)
