@@ -1,5 +1,6 @@
 # =============================================================================
-# Split 28-Week Dataset by Interaction Thresholds: 0-8, 8-16, 16-28 weeks
+# Split 28-Week Dataset by CUSTOMER Interaction Thresholds (SKU-agnostic)
+# Counts unique weeks each customer placed ANY order, then splits by 0-8, 9-16, 17-28
 # =============================================================================
 
 import pandas as pd
@@ -10,26 +11,29 @@ import os
 logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
 
 # -------------------------
-# 1) Calculate Interaction Weeks per Customer-SKU Pair
+# 1) Calculate Interaction Weeks per CUSTOMER (across all SKUs)
 # -------------------------
 df_calc = df.copy()
 df_calc["interaction_flag"] = (df_calc["TOTAL_QUANTITY"] > 0).astype(int)
 
-pair_weeks = (
-    df_calc.groupby(["CUSTOMER_EXTERNAL_CODE", "SKU_ERP_CODE"])
-    .agg(num_interaction_weeks=("interaction_flag", "sum"))
+# Count unique weeks each customer had ANY purchase (any SKU)
+customer_weeks = (
+    df_calc[df_calc["interaction_flag"] == 1]
+    .groupby("CUSTOMER_EXTERNAL_CODE")["WEEK_START_DATE"]
+    .nunique()
     .reset_index()
+    .rename(columns={"WEEK_START_DATE": "num_interaction_weeks"})
 )
 
-logging.info(f"Total customer-SKU pairs: {len(pair_weeks):,}")
+logging.info(f"Total unique customers: {len(customer_weeks):,}")
 logging.info(f"Total weeks in dataset: {df['WEEK_START_DATE'].nunique()}")
-display(pair_weeks["num_interaction_weeks"].describe(percentiles=[0.25, 0.5, 0.75, 0.9, 0.95, 0.99]))
+display(customer_weeks["num_interaction_weeks"].describe(percentiles=[0.25, 0.5, 0.75, 0.9, 0.95, 0.99]))
 
 # -------------------------
 # 2) Define Three Threshold Groups
 # -------------------------
-def assign_threshold_group(num_weeks):
-    """Assign to one of three groups based on interaction weeks"""
+def assign_customer_group(num_weeks):
+    """Assign customer to activity group based on total interaction weeks"""
     if 0 <= num_weeks <= 8:
         return "0_to_8_weeks"
     elif 9 <= num_weeks <= 16:
@@ -37,15 +41,15 @@ def assign_threshold_group(num_weeks):
     elif 17 <= num_weeks <= 28:
         return "17_to_28_weeks"
     else:
-        return "out_of_range"  # Should not happen with 28-week data
+        return "out_of_range"
 
-pair_weeks["threshold_group"] = pair_weeks["num_interaction_weeks"].apply(assign_threshold_group)
+customer_weeks["customer_group"] = customer_weeks["num_interaction_weeks"].apply(assign_customer_group)
 
-# Summary of distribution
-threshold_summary = (
-    pair_weeks.groupby("threshold_group")
+# Summary of customer distribution
+customer_summary = (
+    customer_weeks.groupby("customer_group")
     .agg(
-        num_pairs=("CUSTOMER_EXTERNAL_CODE", "count"),
+        num_customers=("CUSTOMER_EXTERNAL_CODE", "count"),
         mean_weeks=("num_interaction_weeks", "mean"),
         median_weeks=("num_interaction_weeks", "median"),
         min_weeks=("num_interaction_weeks", "min"),
@@ -54,79 +58,109 @@ threshold_summary = (
     .reset_index()
 )
 
-logging.info("Threshold group distribution:")
-display(threshold_summary)
+logging.info("
+Customer group distribution:")
+display(customer_summary)
 
 # -------------------------
-# 3) Merge Back to Full Dataset
+# 3) Merge Customer Group Back to Full Dataset
 # -------------------------
 df_split = df.merge(
-    pair_weeks[["CUSTOMER_EXTERNAL_CODE", "SKU_ERP_CODE", "threshold_group", "num_interaction_weeks"]],
-    on=["CUSTOMER_EXTERNAL_CODE", "SKU_ERP_CODE"],
+    customer_weeks[["CUSTOMER_EXTERNAL_CODE", "customer_group", "num_interaction_weeks"]],
+    on="CUSTOMER_EXTERNAL_CODE",
     how="left"
 )
 
+# Handle customers with no orders (should not exist if filtering by TOTAL_QUANTITY > 0)
+df_split["customer_group"] = df_split["customer_group"].fillna("no_orders")
+logging.info(f"Rows with no customer group assigned: {(df_split['customer_group'] == 'no_orders').sum():,}")
+
 # -------------------------
-# 4) Save Each Group to Separate File
+# 4) Save Each Customer Group to Separate File
 # -------------------------
-output_dir = "data_by_interaction_threshold"
+output_dir = "data_by_customer_threshold"
 os.makedirs(output_dir, exist_ok=True)
 
-threshold_stats = []
+group_stats = []
 
 for group_name in ["0_to_8_weeks", "9_to_16_weeks", "17_to_28_weeks"]:
-    subset = df_split[df_split["threshold_group"] == group_name].copy()
+    subset = df_split[df_split["customer_group"] == group_name].copy()
     
     if len(subset) == 0:
         logging.warning(f"No data for {group_name}")
         continue
     
-    # Drop metadata columns
-    subset_clean = subset.drop(columns=["threshold_group", "num_interaction_weeks"], errors="ignore")
+    # Drop metadata columns before saving
+    subset_clean = subset.drop(columns=["customer_group", "num_interaction_weeks"], errors="ignore")
     
     # Save to parquet
-    output_path = os.path.join(output_dir, f"data_{group_name}.parquet")
+    output_path = os.path.join(output_dir, f"data_customers_{group_name}.parquet")
     subset_clean.to_parquet(output_path, index=False)
     
-    # Collect stats
+    # Collect statistics
     stats = {
-        "threshold_group": group_name,
+        "customer_group": group_name,
         "num_rows": len(subset),
         "num_customers": subset["CUSTOMER_EXTERNAL_CODE"].nunique(),
         "num_skus": subset["SKU_ERP_CODE"].nunique(),
-        "num_pairs": subset.groupby(["CUSTOMER_EXTERNAL_CODE", "SKU_ERP_CODE"]).ngroups,
+        "num_customer_sku_pairs": subset.groupby(["CUSTOMER_EXTERNAL_CODE", "SKU_ERP_CODE"]).ngroups,
         "total_qty": subset["TOTAL_QUANTITY"].sum(),
         "total_value": subset["TOTAL_DLP_VALUE"].sum(),
-        "avg_weeks_per_pair": subset["num_interaction_weeks"].mean()
+        "avg_interaction_weeks": subset["num_interaction_weeks"].mean(),
+        "unique_weeks_in_subset": subset["WEEK_START_DATE"].nunique()
     }
-    threshold_stats.append(stats)
+    group_stats.append(stats)
     
-    logging.info(f"✓ Saved {group_name}: {len(subset):,} rows | "
-                 f"{stats['num_customers']:,} customers | "
-                 f"{stats['num_skus']:,} SKUs | "
-                 f"{stats['num_pairs']:,} pairs")
+    logging.info(f"✓ Saved {group_name}:")
+    logging.info(f"    {len(subset):,} rows | {stats['num_customers']:,} customers | "
+                 f"{stats['num_skus']:,} SKUs | {stats['num_customer_sku_pairs']:,} pairs")
 
 # -------------------------
 # 5) Save Summary Statistics
 # -------------------------
-stats_df = pd.DataFrame(threshold_stats)
+stats_df = pd.DataFrame(group_stats)
 
-# Calculate percentages
+# Calculate contribution percentages
 stats_df["pct_of_total_rows"] = (stats_df["num_rows"] / stats_df["num_rows"].sum() * 100).round(2)
+stats_df["pct_of_total_customers"] = (stats_df["num_customers"] / stats_df["num_customers"].sum() * 100).round(2)
 stats_df["pct_of_total_qty"] = (stats_df["total_qty"] / stats_df["total_qty"].sum() * 100).round(2)
 stats_df["pct_of_total_value"] = (stats_df["total_value"] / stats_df["total_value"].sum() * 100).round(2)
 
 logging.info("
-=== Final Summary ===")
+=== Final Customer Group Summary ===")
 display(stats_df)
 
-stats_df.to_csv(os.path.join(output_dir, "threshold_summary.csv"), index=False)
-pair_weeks.to_csv(os.path.join(output_dir, "pair_interaction_weeks.csv"), index=False)
+stats_df.to_csv(os.path.join(output_dir, "customer_threshold_summary.csv"), index=False)
+customer_weeks.to_csv(os.path.join(output_dir, "customer_interaction_weeks.csv"), index=False)
+
+# -------------------------
+# 6) Additional Analysis: SKU Diversity by Customer Group
+# -------------------------
+sku_diversity = (
+    df_split.groupby(["customer_group", "CUSTOMER_EXTERNAL_CODE"])["SKU_ERP_CODE"]
+    .nunique()
+    .reset_index()
+    .groupby("customer_group")["SKU_ERP_CODE"]
+    .agg(["mean", "median", "min", "max"])
+    .round(2)
+    .reset_index()
+    .rename(columns={"mean": "avg_skus_per_customer", 
+                     "median": "median_skus_per_customer",
+                     "min": "min_skus",
+                     "max": "max_skus"})
+)
+
+logging.info("
+SKU diversity by customer group:")
+display(sku_diversity)
+
+sku_diversity.to_csv(os.path.join(output_dir, "sku_diversity_by_customer_group.csv"), index=False)
 
 logging.info(f"
 ✓ All files saved to: {output_dir}/")
-logging.info(f"  - data_0_to_8_weeks.parquet (low activity)")
-logging.info(f"  - data_9_to_16_weeks.parquet (medium activity)")
-logging.info(f"  - data_17_to_28_weeks.parquet (high activity)")
-logging.info(f"  - threshold_summary.csv (statistics)")
-logging.info(f"  - pair_interaction_weeks.csv (pair metadata)")
+logging.info(f"  - data_customers_0_to_8_weeks.parquet (low activity customers)")
+logging.info(f"  - data_customers_9_to_16_weeks.parquet (medium activity customers)")
+logging.info(f"  - data_customers_17_to_28_weeks.parquet (high activity customers)")
+logging.info(f"  - customer_threshold_summary.csv")
+logging.info(f"  - customer_interaction_weeks.csv")
+logging.info(f"  - sku_diversity_by_customer_group.csv")
