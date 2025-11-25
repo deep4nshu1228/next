@@ -1,166 +1,187 @@
 # =============================================================================
-# Split 28-Week Dataset by CUSTOMER Interaction Thresholds (SKU-agnostic)
-# Counts unique weeks each customer placed ANY order, then splits by 0-8, 9-16, 17-28
+# Memory-Efficient Feature Engineering for 16M Rows on 8GB RAM
+# Uses customer-based chunking to process data in batches
 # =============================================================================
 
 import pandas as pd
 import numpy as np
 import logging
 import os
+import gc
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
 
 # -------------------------
-# 1) Calculate Interaction Weeks per CUSTOMER (across all SKUs)
+# 0) Initial Setup and Memory Optimization
 # -------------------------
-df_calc = df.copy()
-df_calc["interaction_flag"] = (df_calc["TOTAL_QUANTITY"] > 0).astype(int)
+# Define dtypes upfront to reduce memory on load
+DTYPES = {
+    'CUSTOMER_EXTERNAL_CODE': 'category',
+    'SKU_ERP_CODE': 'category',
+    'BASE_PRICE': 'float32',
+    'TOTAL_QUANTITY': 'float32',
+    'TOTAL_DLP_VALUE': 'float32'
+}
 
-# Count unique weeks each customer had ANY purchase (any SKU)
-customer_weeks = (
-    df_calc[df_calc["interaction_flag"] == 1]
-    .groupby("CUSTOMER_EXTERNAL_CODE")["WEEK_START_DATE"]
-    .nunique()
-    .reset_index()
-    .rename(columns={"WEEK_START_DATE": "num_interaction_weeks"})
-)
-
-logging.info(f"Total unique customers: {len(customer_weeks):,}")
-logging.info(f"Total weeks in dataset: {df['WEEK_START_DATE'].nunique()}")
-display(customer_weeks["num_interaction_weeks"].describe(percentiles=[0.25, 0.5, 0.75, 0.9, 0.95, 0.99]))
+DATE_COLS = ['WEEK_START_DATE', 'WEEK_END_DATE']
 
 # -------------------------
-# 2) Define Three Threshold Groups
+# 1) Load Customer List Only (Minimal Memory)
 # -------------------------
-def assign_customer_group(num_weeks):
-    """Assign customer to activity group based on total interaction weeks"""
-    if 0 <= num_weeks <= 8:
-        return "0_to_8_weeks"
-    elif 9 <= num_weeks <= 16:
-        return "9_to_16_weeks"
-    elif 17 <= num_weeks <= 28:
-        return "17_to_28_weeks"
-    else:
-        return "out_of_range"
+logging.info("Loading customer list...")
+customers = pd.read_parquet(
+    'your_data.parquet',
+    columns=['CUSTOMER_EXTERNAL_CODE']
+)['CUSTOMER_EXTERNAL_CODE'].unique()
 
-customer_weeks["customer_group"] = customer_weeks["num_interaction_weeks"].apply(assign_customer_group)
-
-# Summary of customer distribution
-customer_summary = (
-    customer_weeks.groupby("customer_group")
-    .agg(
-        num_customers=("CUSTOMER_EXTERNAL_CODE", "count"),
-        mean_weeks=("num_interaction_weeks", "mean"),
-        median_weeks=("num_interaction_weeks", "median"),
-        min_weeks=("num_interaction_weeks", "min"),
-        max_weeks=("num_interaction_weeks", "max")
-    )
-    .reset_index()
-)
-
-logging.info("
-Customer group distribution:")
-display(customer_summary)
+logging.info(f"Total customers: {len(customers):,}")
 
 # -------------------------
-# 3) Merge Customer Group Back to Full Dataset
+# 2) Define Batch Size and Chunking Strategy
 # -------------------------
-df_split = df.merge(
-    customer_weeks[["CUSTOMER_EXTERNAL_CODE", "customer_group", "num_interaction_weeks"]],
-    on="CUSTOMER_EXTERNAL_CODE",
-    how="left"
-)
+BATCH_SIZE = 2000  # Process 2000 customers at a time (adjust based on memory)
+num_batches = int(np.ceil(len(customers) / BATCH_SIZE))
 
-# Handle customers with no orders (should not exist if filtering by TOTAL_QUANTITY > 0)
-df_split["customer_group"] = df_split["customer_group"].fillna("no_orders")
-logging.info(f"Rows with no customer group assigned: {(df_split['customer_group'] == 'no_orders').sum():,}")
+logging.info(f"Processing in {num_batches} batches of ~{BATCH_SIZE} customers each")
 
 # -------------------------
-# 4) Save Each Customer Group to Separate File
+# 3) Feature Engineering Function (Memory-Conscious)
 # -------------------------
-output_dir = "data_by_customer_threshold"
+def create_features_chunk(df_chunk):
+    """
+    Create features for a subset of customers
+    Returns only essential features to minimize memory
+    """
+    GROUP_KEYS = ["CUSTOMER_EXTERNAL_CODE", "SKU_ERP_CODE"]
+    TARGET = "TOTAL_QUANTITY"
+    
+    # Sort for time-series operations
+    df_chunk = df_chunk.sort_values(GROUP_KEYS + ["WEEK_START_DATE"])
+    
+    # Derived fields
+    df_chunk["UNIT_DLP_PRICE"] = np.where(
+        df_chunk[TARGET] > 0,
+        df_chunk["TOTAL_DLP_VALUE"] / df_chunk[TARGET],
+        np.nan
+    ).astype('float32')
+    
+    # Temporal features (minimal set)
+    iso = df_chunk["WEEK_START_DATE"].dt.isocalendar()
+    df_chunk["YEAR"] = iso.year.astype("int16")
+    df_chunk["WEEK"] = iso.week.astype("int8")
+    df_chunk["MONTH"] = df_chunk["WEEK_START_DATE"].dt.month.astype("int8")
+    df_chunk["WEEK_SIN"] = np.sin(2*np.pi*df_chunk["WEEK"]/52.0).astype('float32')
+    df_chunk["WEEK_COS"] = np.cos(2*np.pi*df_chunk["WEEK"]/52.0).astype('float32')
+    
+    # Core lags (limited set for memory)
+    def add_lag_features(g):
+        for L in [1, 2, 4, 8]:  # Reduced lag set
+            g[f"qty_lag{L}"] = g[TARGET].shift(L).astype('float32')
+        return g
+    
+    df_chunk = df_chunk.groupby(GROUP_KEYS, group_keys=False).apply(add_lag_features)
+    
+    # Rolling features (essential only)
+    def add_rolling_features(g):
+        s = g[TARGET].shift(1)
+        for w in [4, 8]:  # Only 4 and 8 week windows
+            g[f"qty_rollmean_{w}"] = s.rolling(w, min_periods=1).mean().astype('float32')
+            g[f"qty_rollstd_{w}"] = s.rolling(w, min_periods=2).std().astype('float32')
+        return g
+    
+    df_chunk = df_chunk.groupby(GROUP_KEYS, group_keys=False).apply(add_rolling_features)
+    
+    # Exponential smoothing (minimal)
+    def add_ewm_features(g):
+        s = g[TARGET].shift(1)
+        g["qty_ewm_mean_h4"] = s.ewm(halflife=4, min_periods=1, adjust=False).mean().astype('float32')
+        return g
+    
+    df_chunk = df_chunk.groupby(GROUP_KEYS, group_keys=False).apply(add_ewm_features)
+    
+    # Intermittency
+    def add_intermittency(g):
+        nz = (g[TARGET].shift(1).fillna(0) > 0).astype(int)
+        g["nonzero_ratio_8"] = nz.rolling(8, min_periods=1).mean().astype('float32')
+        return g
+    
+    df_chunk = df_chunk.groupby(GROUP_KEYS, group_keys=False).apply(add_intermittency)
+    
+    # Fill NaNs
+    feature_cols = [c for c in df_chunk.columns if c.startswith(('qty_', 'nonzero_'))]
+    df_chunk[feature_cols] = df_chunk.groupby(GROUP_KEYS)[feature_cols].apply(
+        lambda g: g.fillna(method='ffill').fillna(0)
+    ).values
+    
+    return df_chunk
+
+# -------------------------
+# 4) Batch Processing Loop
+# -------------------------
+output_dir = "features_batches"
 os.makedirs(output_dir, exist_ok=True)
 
-group_stats = []
-
-for group_name in ["0_to_8_weeks", "9_to_16_weeks", "17_to_28_weeks"]:
-    subset = df_split[df_split["customer_group"] == group_name].copy()
+for batch_idx in range(num_batches):
+    start_idx = batch_idx * BATCH_SIZE
+    end_idx = min((batch_idx + 1) * BATCH_SIZE, len(customers))
+    batch_customers = customers[start_idx:end_idx]
     
-    if len(subset) == 0:
-        logging.warning(f"No data for {group_name}")
-        continue
+    logging.info(f"
+=== Batch {batch_idx+1}/{num_batches} ===")
+    logging.info(f"Processing customers {start_idx:,} to {end_idx:,}")
     
-    # Drop metadata columns before saving
-    subset_clean = subset.drop(columns=["customer_group", "num_interaction_weeks"], errors="ignore")
+    # Load only this batch of customers
+    df_batch = pd.read_parquet(
+        'your_data.parquet',
+        filters=[('CUSTOMER_EXTERNAL_CODE', 'in', batch_customers.tolist())],
+        dtype=DTYPES
+    )
     
-    # Save to parquet
-    output_path = os.path.join(output_dir, f"data_customers_{group_name}.parquet")
-    subset_clean.to_parquet(output_path, index=False)
+    logging.info(f"Loaded {len(df_batch):,} rows for {len(batch_customers):,} customers")
     
-    # Collect statistics
-    stats = {
-        "customer_group": group_name,
-        "num_rows": len(subset),
-        "num_customers": subset["CUSTOMER_EXTERNAL_CODE"].nunique(),
-        "num_skus": subset["SKU_ERP_CODE"].nunique(),
-        "num_customer_sku_pairs": subset.groupby(["CUSTOMER_EXTERNAL_CODE", "SKU_ERP_CODE"]).ngroups,
-        "total_qty": subset["TOTAL_QUANTITY"].sum(),
-        "total_value": subset["TOTAL_DLP_VALUE"].sum(),
-        "avg_interaction_weeks": subset["num_interaction_weeks"].mean(),
-        "unique_weeks_in_subset": subset["WEEK_START_DATE"].nunique()
-    }
-    group_stats.append(stats)
+    # Create features
+    df_features = create_features_chunk(df_batch)
     
-    logging.info(f"✓ Saved {group_name}:")
-    logging.info(f"    {len(subset):,} rows | {stats['num_customers']:,} customers | "
-                 f"{stats['num_skus']:,} SKUs | {stats['num_customer_sku_pairs']:,} pairs")
-
-# -------------------------
-# 5) Save Summary Statistics
-# -------------------------
-stats_df = pd.DataFrame(group_stats)
-
-# Calculate contribution percentages
-stats_df["pct_of_total_rows"] = (stats_df["num_rows"] / stats_df["num_rows"].sum() * 100).round(2)
-stats_df["pct_of_total_customers"] = (stats_df["num_customers"] / stats_df["num_customers"].sum() * 100).round(2)
-stats_df["pct_of_total_qty"] = (stats_df["total_qty"] / stats_df["total_qty"].sum() * 100).round(2)
-stats_df["pct_of_total_value"] = (stats_df["total_value"] / stats_df["total_value"].sum() * 100).round(2)
+    # Save batch
+    output_path = os.path.join(output_dir, f"features_batch_{batch_idx:04d}.parquet")
+    df_features.to_parquet(output_path, index=False)
+    
+    logging.info(f"Saved batch to {output_path}")
+    
+    # Free memory
+    del df_batch, df_features
+    gc.collect()
 
 logging.info("
-=== Final Customer Group Summary ===")
-display(stats_df)
-
-stats_df.to_csv(os.path.join(output_dir, "customer_threshold_summary.csv"), index=False)
-customer_weeks.to_csv(os.path.join(output_dir, "customer_interaction_weeks.csv"), index=False)
+✓ All batches processed successfully")
 
 # -------------------------
-# 6) Additional Analysis: SKU Diversity by Customer Group
+# 5) Optional: Combine Batches for Train/Valid Split
 # -------------------------
-sku_diversity = (
-    df_split.groupby(["customer_group", "CUSTOMER_EXTERNAL_CODE"])["SKU_ERP_CODE"]
-    .nunique()
-    .reset_index()
-    .groupby("customer_group")["SKU_ERP_CODE"]
-    .agg(["mean", "median", "min", "max"])
-    .round(2)
-    .reset_index()
-    .rename(columns={"mean": "avg_skus_per_customer", 
-                     "median": "median_skus_per_customer",
-                     "min": "min_skus",
-                     "max": "max_skus"})
-)
+def combine_batches_for_modeling():
+    """
+    Load all batches and create train/valid split
+    Uses chunked reading to avoid memory issues
+    """
+    import glob
+    
+    batch_files = sorted(glob.glob(os.path.join(output_dir, "features_batch_*.parquet")))
+    
+    N_VALID_WEEKS = 8
+    
+    for batch_file in batch_files:
+        df = pd.read_parquet(batch_file)
+        
+        max_week = df["WEEK_START_DATE"].max()
+        val_start = max_week - pd.to_timedelta(7 * (N_VALID_WEEKS - 1), unit="D")
+        df["SPLIT"] = np.where(df["WEEK_START_DATE"] >= val_start, "VALID", "TRAIN")
+        
+        # Save back with split
+        df.to_parquet(batch_file.replace('.parquet', '_with_split.parquet'), index=False)
+        del df
+        gc.collect()
+    
+    logging.info("Added train/valid split to all batches")
 
-logging.info("
-SKU diversity by customer group:")
-display(sku_diversity)
-
-sku_diversity.to_csv(os.path.join(output_dir, "sku_diversity_by_customer_group.csv"), index=False)
-
-logging.info(f"
-✓ All files saved to: {output_dir}/")
-logging.info(f"  - data_customers_0_to_8_weeks.parquet (low activity customers)")
-logging.info(f"  - data_customers_9_to_16_weeks.parquet (medium activity customers)")
-logging.info(f"  - data_customers_17_to_28_weeks.parquet (high activity customers)")
-logging.info(f"  - customer_threshold_summary.csv")
-logging.info(f"  - customer_interaction_weeks.csv")
-logging.info(f"  - sku_diversity_by_customer_group.csv")
+# Uncomment to add splits
+# combine_batches_for_modeling()
