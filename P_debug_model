@@ -1,0 +1,376 @@
+# =============================================================================
+# Debug and Fix XGBoost Model - Handle Negative R² Score
+# =============================================================================
+
+import pandas as pd
+import numpy as np
+import xgboost as xgb
+import logging
+import os
+import glob
+import gc
+from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
+import matplotlib.pyplot as plt
+import seaborn as sns
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
+
+# -------------------------
+# 0) Configuration
+# -------------------------
+BATCHES_DIR = "features_batches"
+MODEL_DIR = "models"
+os.makedirs(MODEL_DIR, exist_ok=True)
+
+NUM_BATCHES_TO_COMBINE = 5
+TARGET = "y"  # CRITICAL: Make sure this matches your target column
+N_VALID_WEEKS = 8
+
+EXCLUDE_COLS = {
+    'WEEK_START_DATE', 'WEEK_END_DATE',
+    'FIRST_NONZERO_WEEK', 'ORDER_IDS', 'ORDER_DATES',
+    'TOTAL_QUANTITY', 'y', 'y_log1p',
+    'TOTAL_DLP_VALUE', 'TOTAL_BASE_PRICE', 'BASE_PRICE'
+}
+
+# -------------------------
+# 1) Load and Diagnose Data
+# -------------------------
+batch_files = sorted(glob.glob(os.path.join(BATCHES_DIR, "features_batch_*.parquet")))[:NUM_BATCHES_TO_COMBINE]
+
+logging.info(f"Loading {len(batch_files)} batches...")
+
+df_list = []
+for batch_file in batch_files:
+    df_batch = pd.read_parquet(batch_file)
+    df_list.append(df_batch)
+    logging.info(f"  Loaded {batch_file}: {len(df_batch):,} rows")
+
+df = pd.concat(df_list, ignore_index=True)
+del df_list
+gc.collect()
+
+logging.info(f"
+{'='*60}")
+logging.info("Data Diagnostics")
+logging.info(f"{'='*60}")
+logging.info(f"Total rows: {len(df):,}")
+logging.info(f"Total columns: {df.shape[1]}")
+
+# -------------------------
+# 2) CRITICAL: Check Target Variable
+# -------------------------
+logging.info(f"
+{'='*60}")
+logging.info("Target Variable Analysis")
+logging.info(f"{'='*60}")
+
+# Check if target exists
+if TARGET not in df.columns:
+    available_targets = [c for c in df.columns if c in ['TOTAL_QUANTITY', 'y', 'y_log1p']]
+    logging.error(f"ERROR: Target '{TARGET}' not found!")
+    logging.error(f"Available targets: {available_targets}")
+    raise ValueError(f"Target column '{TARGET}' does not exist. Choose from {available_targets}")
+
+# Target statistics
+target_stats = df[TARGET].describe()
+logging.info(f"
+Target '{TARGET}' statistics:")
+print(target_stats)
+
+# Check for issues
+null_count = df[TARGET].isnull().sum()
+zero_count = (df[TARGET] == 0).sum()
+negative_count = (df[TARGET] < 0).sum()
+inf_count = np.isinf(df[TARGET]).sum()
+
+logging.info(f"
+Target quality checks:")
+logging.info(f"  Null values: {null_count:,} ({null_count/len(df)*100:.2f}%)")
+logging.info(f"  Zero values: {zero_count:,} ({zero_count/len(df)*100:.2f}%)")
+logging.info(f"  Negative values: {negative_count:,}")
+logging.info(f"  Infinite values: {inf_count:,}")
+
+# Drop rows with problematic targets
+if null_count > 0 or inf_count > 0 or negative_count > 0:
+    logging.warning(f"Removing {null_count + inf_count + negative_count:,} problematic target rows")
+    df = df[df[TARGET].notna() & np.isfinite(df[TARGET]) & (df[TARGET] >= 0)]
+    logging.info(f"Remaining rows: {len(df):,}")
+
+# -------------------------
+# 3) Check Features for Issues
+# -------------------------
+logging.info(f"
+{'='*60}")
+logging.info("Feature Quality Checks")
+logging.info(f"{'='*60}")
+
+feature_cols = [c for c in df.columns if c not in EXCLUDE_COLS]
+logging.info(f"Total features: {len(feature_cols)}")
+
+# Check for constant features
+constant_features = []
+for col in feature_cols:
+    if df[col].nunique() == 1:
+        constant_features.append(col)
+
+if constant_features:
+    logging.warning(f"Removing {len(constant_features)} constant features: {constant_features}")
+    df = df.drop(columns=constant_features)
+    feature_cols = [c for c in feature_cols if c not in constant_features]
+
+# Check for high null percentage features
+high_null_features = []
+for col in feature_cols:
+    null_pct = df[col].isnull().sum() / len(df) * 100
+    if null_pct > 50:
+        high_null_features.append((col, null_pct))
+
+if high_null_features:
+    logging.warning(f"Features with >50% nulls:")
+    for col, pct in high_null_features[:10]:
+        logging.warning(f"  {col}: {pct:.1f}% null")
+
+# Fill remaining NaNs and infinities
+logging.info("
+Filling NaN and Inf values in features...")
+for col in feature_cols:
+    if df[col].dtype in ['float64', 'float32', 'int64', 'int32']:
+        df[col] = df[col].replace([np.inf, -np.inf], np.nan)
+        df[col] = df[col].fillna(0)
+
+# -------------------------
+# 4) Train/Validation Split
+# -------------------------
+max_week = df['WEEK_START_DATE'].max()
+val_start = max_week - pd.to_timedelta(7 * (N_VALID_WEEKS - 1), unit="D")
+
+logging.info(f"
+{'='*60}")
+logging.info("Train/Validation Split")
+logging.info(f"{'='*60}")
+logging.info(f"Split date: {val_start.date()}")
+
+train = df[df['WEEK_START_DATE'] < val_start].copy()
+valid = df[df['WEEK_START_DATE'] >= val_start].copy()
+
+logging.info(f"Train: {len(train):,} rows")
+logging.info(f"Valid: {len(valid):,} rows")
+
+# Check if validation set has samples
+if len(valid) == 0:
+    logging.error("ERROR: Validation set is empty!")
+    raise ValueError("Validation set has no data. Check date range.")
+
+# Save identifiers
+valid_ids = valid[['CUSTOMER_EXTERNAL_CODE', 'SKU_ERP_CODE', 'WEEK_START_DATE']].copy()
+
+# Compare target distributions
+logging.info(f"
+Target distribution comparison:")
+logging.info(f"Train mean: {train[TARGET].mean():.2f}, std: {train[TARGET].std():.2f}")
+logging.info(f"Valid mean: {valid[TARGET].mean():.2f}, std: {valid[TARGET].std():.2f}")
+
+del df
+gc.collect()
+
+# -------------------------
+# 5) Prepare Features
+# -------------------------
+def prepare_features(df_input):
+    """Extract features and encode categoricals"""
+    
+    feature_cols_clean = [c for c in df_input.columns if c not in EXCLUDE_COLS and c in feature_cols]
+    
+    X = df_input[feature_cols_clean].copy()
+    y = df_input[TARGET].values
+    
+    # Encode categoricals
+    cat_cols = X.select_dtypes(include=['category', 'object']).columns.tolist()
+    for col in cat_cols:
+        X[col] = pd.Categorical(X[col]).codes
+    
+    return X.values, y, feature_cols_clean
+
+logging.info("
+Preparing features...")
+X_train, y_train, feature_names = prepare_features(train)
+X_valid, y_valid, _ = prepare_features(valid)
+
+logging.info(f"Train shape: {X_train.shape}")
+logging.info(f"Valid shape: {X_valid.shape}")
+
+del train, valid
+gc.collect()
+
+# -------------------------
+# 6) Baseline Model Check
+# -------------------------
+logging.info(f"
+{'='*60}")
+logging.info("Baseline Model Performance")
+logging.info(f"{'='*60}")
+
+# Simple mean baseline
+y_pred_mean = np.full(len(y_valid), y_train.mean())
+baseline_rmse = np.sqrt(mean_squared_error(y_valid, y_pred_mean))
+baseline_r2 = r2_score(y_valid, y_pred_mean)
+
+logging.info(f"Mean baseline prediction: {y_train.mean():.2f}")
+logging.info(f"Baseline RMSE: {baseline_rmse:.4f}")
+logging.info(f"Baseline R²: {baseline_r2:.4f}")
+
+# -------------------------
+# 7) Create DMatrix
+# -------------------------
+logging.info("
+Creating DMatrix...")
+dtrain = xgb.DMatrix(X_train, label=y_train, feature_names=feature_names)
+dvalid = xgb.DMatrix(X_valid, label=y_valid, feature_names=feature_names)
+
+del X_train, X_valid
+gc.collect()
+
+# -------------------------
+# 8) Fixed XGBoost Parameters (Conservative)
+# -------------------------
+params = {
+    'objective': 'reg:squarederror',
+    'eval_metric': ['rmse', 'mae'],
+    'max_depth': 5,  # Reduced to prevent overfitting
+    'learning_rate': 0.01,  # Lower learning rate
+    'subsample': 0.8,
+    'colsample_bytree': 0.8,
+    'min_child_weight': 10,  # Higher regularization
+    'gamma': 1,  # Regularization
+    'reg_alpha': 1.0,  # L1 regularization
+    'reg_lambda': 2.0,  # L2 regularization
+    'tree_method': 'hist',
+    'max_bin': 256,
+    'random_state': 42,
+    'n_jobs': -1
+}
+
+logging.info(f"
+{'='*60}")
+logging.info("XGBoost Parameters (Conservative)")
+logging.info(f"{'='*60}")
+for k, v in params.items():
+    logging.info(f"  {k}: {v}")
+
+# -------------------------
+# 9) Train Model with Monitoring
+# -------------------------
+logging.info(f"
+{'='*60}")
+logging.info("Training XGBoost Model")
+logging.info(f"{'='*60}")
+
+evals = [(dtrain, 'train'), (dvalid, 'valid')]
+evals_result = {}
+
+model = xgb.train(
+    params,
+    dtrain,
+    num_boost_round=2000,  # More rounds with lower LR
+    evals=evals,
+    early_stopping_rounds=100,
+    verbose_eval=100,
+    evals_result=evals_result
+)
+
+best_iteration = model.best_iteration
+logging.info(f"
+Best iteration: {best_iteration}")
+
+# -------------------------
+# 10) Evaluate Model
+# -------------------------
+logging.info(f"
+{'='*60}")
+logging.info("Model Evaluation")
+logging.info(f"{'='*60}")
+
+y_pred = model.predict(dvalid)
+
+# Clip predictions to reasonable range
+y_pred_clipped = np.clip(y_pred, 0, y_train.max() * 2)
+
+rmse = np.sqrt(mean_squared_error(y_valid, y_pred_clipped))
+mae = mean_absolute_error(y_valid, y_pred_clipped)
+r2 = r2_score(y_valid, y_pred_clipped)
+
+mask = y_valid > 0
+mape = np.mean(np.abs((y_valid[mask] - y_pred_clipped[mask]) / y_valid[mask])) * 100 if mask.sum() > 0 else np.nan
+
+logging.info(f"
+Model Performance:")
+logging.info(f"  RMSE:  {rmse:.4f} (Baseline: {baseline_rmse:.4f})")
+logging.info(f"  MAE:   {mae:.4f}")
+logging.info(f"  R²:    {r2:.4f} (Baseline: {baseline_r2:.4f})")
+logging.info(f"  MAPE:  {mape:.2f}%")
+
+if r2 < 0:
+    logging.error("
+⚠️  WARNING: R² is still negative!")
+    logging.error("Possible causes:")
+    logging.error("  1. Target leakage in features (remove raw target columns)")
+    logging.error("  2. Temporal leakage (features using future info)")
+    logging.error("  3. Train/valid distributions very different")
+    logging.error("  4. Insufficient training data")
+    logging.error("  5. Wrong target column selected")
+else:
+    logging.info(f"
+✓ Model improvement over baseline: {r2 - baseline_r2:.4f}")
+
+# -------------------------
+# 11) Prediction Analysis
+# -------------------------
+logging.info(f"
+{'='*60}")
+logging.info("Prediction Analysis")
+logging.info(f"{'='*60}")
+
+logging.info(f"Actual min/max: {y_valid.min():.2f} / {y_valid.max():.2f}")
+logging.info(f"Predicted min/max: {y_pred_clipped.min():.2f} / {y_pred_clipped.max():.2f}")
+logging.info(f"Predictions outside range: {((y_pred_clipped < 0) | (y_pred_clipped > y_train.max() * 2)).sum()}")
+
+# Sample predictions
+sample_size = min(30, len(valid_ids))
+sample_idx = np.random.choice(len(valid_ids), sample_size, replace=False)
+
+results = pd.DataFrame({
+    'CUSTOMER': valid_ids.iloc[sample_idx]['CUSTOMER_EXTERNAL_CODE'].values,
+    'SKU': valid_ids.iloc[sample_idx]['SKU_ERP_CODE'].values,
+    'WEEK': valid_ids.iloc[sample_idx]['WEEK_START_DATE'].dt.date.values,
+    'actual': y_valid[sample_idx],
+    'predicted': y_pred_clipped[sample_idx],
+    'error': y_valid[sample_idx] - y_pred_clipped[sample_idx],
+    'abs_error': np.abs(y_valid[sample_idx] - y_pred_clipped[sample_idx])
+})
+
+logging.info("
+Sample Predictions:")
+print(results.head(20).to_string(index=False))
+
+# -------------------------
+# 12) Save Model and Results
+# -------------------------
+model_path = os.path.join(MODEL_DIR, "xgboost_fixed.json")
+model.save_model(model_path)
+
+metrics_df = pd.DataFrame([{
+    'rmse': rmse,
+    'mae': mae,
+    'r2': r2,
+    'mape': mape,
+    'baseline_rmse': baseline_rmse,
+    'baseline_r2': baseline_r2,
+    'improvement': r2 - baseline_r2,
+    'best_iteration': best_iteration
+}])
+metrics_df.to_csv(os.path.join(MODEL_DIR, "metrics_fixed.csv"), index=False)
+results.to_csv(os.path.join(MODEL_DIR, "predictions_analysis.csv"), index=False)
+
+logging.info(f"
+✓ Results saved to {MODEL_DIR}/")
