@@ -185,3 +185,201 @@ def combine_batches_for_modeling():
 
 # Uncomment to add splits
 # combine_batches_for_modeling()
+
+
+
+
+
+
+
+
+# =============================================================================
+# Join Feature Batches and Create Train/Validation Split
+# =============================================================================
+
+import pandas as pd
+import numpy as np
+import logging
+import glob
+import os
+import gc
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
+
+# -------------------------
+# 1) Join All Batches
+# -------------------------
+OUTPUT_DIR = "features_batches"
+batch_files = sorted(glob.glob(os.path.join(OUTPUT_DIR, "features_batch_*.csv")))
+
+logging.info(f"Found {len(batch_files)} batch files to combine")
+
+# Option A: Load all batches into memory (if they fit in RAM)
+def join_all_batches_in_memory():
+    """Use if all batches combined fit in your RAM"""
+    batch_list = []
+    
+    for batch_file in batch_files:
+        logging.info(f"Loading {batch_file}...")
+        df = pd.read_csv(
+            batch_file,
+            dtype={'CUSTOMER_EXTERNAL_CODE': 'category', 'SKU_ERP_CODE': 'category'},
+            parse_dates=['WEEK_START_DATE', 'WEEK_END_DATE']
+        )
+        batch_list.append(df)
+        logging.info(f"  Loaded {len(df):,} rows")
+    
+    # Combine all batches
+    logging.info("
+Combining all batches...")
+    df_all = pd.concat(batch_list, ignore_index=True)
+    del batch_list
+    gc.collect()
+    
+    logging.info(f"✓ Combined dataset: {len(df_all):,} rows, {df_all.shape[1]} columns")
+    return df_all
+
+# Option B: Process batches one-by-one and save train/valid separately (memory-efficient)
+def join_batches_memory_efficient():
+    """Use if combined batches don't fit in RAM - processes incrementally"""
+    
+    N_VALID_WEEKS = 8
+    
+    # First pass: find global max week for validation cutoff
+    logging.info("Finding global max week...")
+    max_week = pd.Timestamp.min
+    
+    for batch_file in batch_files:
+        df_sample = pd.read_csv(batch_file, usecols=['WEEK_START_DATE'], parse_dates=['WEEK_START_DATE'])
+        batch_max = df_sample['WEEK_START_DATE'].max()
+        if batch_max > max_week:
+            max_week = batch_max
+        del df_sample
+        gc.collect()
+    
+    val_start = max_week - pd.to_timedelta(7 * (N_VALID_WEEKS - 1), unit="D")
+    logging.info(f"Validation window: {val_start.date()} to {max_week.date()}")
+    
+    # Second pass: split each batch into train/valid and save
+    train_files = []
+    valid_files = []
+    
+    for idx, batch_file in enumerate(batch_files):
+        logging.info(f"
+Processing {batch_file} ({idx+1}/{len(batch_files)})...")
+        
+        df = pd.read_csv(
+            batch_file,
+            dtype={'CUSTOMER_EXTERNAL_CODE': 'category', 'SKU_ERP_CODE': 'category'},
+            parse_dates=['WEEK_START_DATE', 'WEEK_END_DATE']
+        )
+        
+        # Split into train and validation
+        train = df[df['WEEK_START_DATE'] < val_start].copy()
+        valid = df[df['WEEK_START_DATE'] >= val_start].copy()
+        
+        # Save splits
+        if len(train) > 0:
+            train_file = os.path.join(OUTPUT_DIR, f"train_batch_{idx:04d}.csv")
+            train.to_csv(train_file, index=False)
+            train_files.append(train_file)
+            logging.info(f"  Train: {len(train):,} rows -> {train_file}")
+        
+        if len(valid) > 0:
+            valid_file = os.path.join(OUTPUT_DIR, f"valid_batch_{idx:04d}.csv")
+            valid.to_csv(valid_file, index=False)
+            valid_files.append(valid_file)
+            logging.info(f"  Valid: {len(valid):,} rows -> {valid_file}")
+        
+        del df, train, valid
+        gc.collect()
+    
+    return train_files, valid_files
+
+# -------------------------
+# 2) Create Train/Validation Split
+# -------------------------
+N_VALID_WEEKS = 8  # Last 8 weeks for validation
+
+# Choose option based on your memory
+USE_MEMORY_EFFICIENT = True  # Set False if all batches fit in RAM
+
+if USE_MEMORY_EFFICIENT:
+    # Memory-efficient approach - saves train/valid separately per batch
+    train_files, valid_files = join_batches_memory_efficient()
+    
+    logging.info(f"
+✓ Created {len(train_files)} train batches and {len(valid_files)} valid batches")
+    logging.info("Use these for batch-wise training or combine further as needed")
+    
+else:
+    # Load all in memory approach
+    df_all = join_all_batches_in_memory()
+    
+    # Create train/valid split
+    max_week = df_all['WEEK_START_DATE'].max()
+    val_start = max_week - pd.to_timedelta(7 * (N_VALID_WEEKS - 1), unit="D")
+    
+    logging.info(f"
+Splitting data...")
+    logging.info(f"Validation window: {val_start.date()} to {max_week.date()}")
+    
+    train = df_all[df_all['WEEK_START_DATE'] < val_start].copy()
+    valid = df_all[df_all['WEEK_START_DATE'] >= val_start].copy()
+    
+    logging.info(f"Train: {len(train):,} rows ({len(train)/len(df_all)*100:.1f}%)")
+    logging.info(f"Valid: {len(valid):,} rows ({len(valid)/len(df_all)*100:.1f}%)")
+    
+    # Save to CSV
+    logging.info("
+Saving train/valid datasets...")
+    train.to_csv(os.path.join(OUTPUT_DIR, "train_full.csv"), index=False)
+    valid.to_csv(os.path.join(OUTPUT_DIR, "valid_full.csv"), index=False)
+    
+    logging.info(f"✓ Saved to {OUTPUT_DIR}/train_full.csv and valid_full.csv")
+    
+    del df_all, train, valid
+    gc.collect()
+
+# -------------------------
+# 3) Optional: Combine Train/Valid Batches into Single Files
+# -------------------------
+def combine_split_batches(file_pattern, output_name):
+    """Combine multiple batch files into single CSV"""
+    files = sorted(glob.glob(os.path.join(OUTPUT_DIR, file_pattern)))
+    
+    if len(files) == 0:
+        logging.warning(f"No files found matching {file_pattern}")
+        return
+    
+    logging.info(f"
+Combining {len(files)} files into {output_name}...")
+    
+    first = True
+    total_rows = 0
+    
+    for f in files:
+        df = pd.read_csv(f)
+        total_rows += len(df)
+        
+        df.to_csv(
+            os.path.join(OUTPUT_DIR, output_name),
+            mode='w' if first else 'a',
+            header=first,
+            index=False
+        )
+        
+        first = False
+        del df
+        gc.collect()
+    
+    logging.info(f"✓ Combined {total_rows:,} rows into {output_name}")
+
+# Uncomment to combine train/valid batches into single files
+# combine_split_batches("train_batch_*.csv", "train_combined.csv")
+# combine_split_batches("valid_batch_*.csv", "valid_combined.csv")
+
+logging.info("
+" + "="*60)
+logging.info("✓ All processing complete!")
+logging.info("="*60)
