@@ -1,15 +1,12 @@
 # =============================================================================
-# Memory-Efficient XGBoost Regression for Demand Forecasting
-# Uses incremental training and batch processing for 8GB RAM
+# Train XGBoost on Single Feature Batch with Train/Valid Split
 # =============================================================================
 
 import pandas as pd
 import numpy as np
 import xgboost as xgb
 import logging
-import glob
 import os
-import gc
 from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
@@ -17,11 +14,12 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(
 # -------------------------
 # 0) Configuration
 # -------------------------
-OUTPUT_DIR = "features_batches"
+BATCH_FILE = "features_batches/features_batch_0000.parquet"  # Your first batch
 MODEL_DIR = "models"
 os.makedirs(MODEL_DIR, exist_ok=True)
 
-TARGET = "TOTAL_QUANTITY"  # or "y_log1p" if using log-transformed target
+TARGET = "y"  # or "TOTAL_QUANTITY" or "y_log1p" depending on what you created
+N_VALID_WEEKS = 8
 
 # Columns to exclude from features
 EXCLUDE_COLS = {
@@ -29,332 +27,200 @@ EXCLUDE_COLS = {
     'WEEK_START_DATE', 'WEEK_END_DATE',
     'FIRST_NONZERO_WEEK', 'ORDER_IDS', 'ORDER_DATES',
     'TOTAL_QUANTITY', 'y', 'y_log1p',
-    'SPLIT', 'TOTAL_DLP_VALUE', 'TOTAL_BASE_PRICE'
+    'TOTAL_DLP_VALUE', 'TOTAL_BASE_PRICE', 'BASE_PRICE'
 }
 
 # -------------------------
-# 1) Load Data in Memory-Efficient Way
+# 1) Load Feature Batch
 # -------------------------
-def load_data_efficiently(file_pattern, sample_frac=1.0):
-    """
-    Load train/valid data with optional sampling to reduce memory
-    """
-    files = sorted(glob.glob(os.path.join(OUTPUT_DIR, file_pattern)))
-    
-    if len(files) == 0:
-        raise FileNotFoundError(f"No files found matching {file_pattern}")
-    
-    logging.info(f"Found {len(files)} files for pattern {file_pattern}")
-    
-    df_list = []
-    total_rows = 0
-    
-    for f in files:
-        df = pd.read_csv(
-            f,
-            dtype={'CUSTOMER_EXTERNAL_CODE': 'category', 'SKU_ERP_CODE': 'category'}
-        )
-        
-        # Optional: sample to reduce memory
-        if sample_frac < 1.0:
-            df = df.sample(frac=sample_frac, random_state=42)
-        
-        df_list.append(df)
-        total_rows += len(df)
-        logging.info(f"  Loaded {f}: {len(df):,} rows")
-    
-    df_combined = pd.concat(df_list, ignore_index=True)
-    del df_list
-    gc.collect()
-    
-    logging.info(f"✓ Total rows loaded: {total_rows:,}")
-    return df_combined
+logging.info(f"Loading feature batch: {BATCH_FILE}")
+df = pd.read_parquet(BATCH_FILE)
+
+logging.info(f"Loaded {len(df):,} rows, {df.shape[1]} columns")
+logging.info(f"Date range: {df['WEEK_START_DATE'].min()} to {df['WEEK_START_DATE'].max()}")
 
 # -------------------------
-# 2) Prepare Features and Target
+# 2) Train/Validation Split by Time
 # -------------------------
-def prepare_features(df):
-    """Extract features and target, handle categoricals"""
+max_week = df['WEEK_START_DATE'].max()
+val_start = max_week - pd.to_timedelta(7 * (N_VALID_WEEKS - 1), unit="D")
+
+logging.info(f"
+Splitting data:")
+logging.info(f"  Train: weeks < {val_start.date()}")
+logging.info(f"  Valid: weeks >= {val_start.date()}")
+
+train = df[df['WEEK_START_DATE'] < val_start].copy()
+valid = df[df['WEEK_START_DATE'] >= val_start].copy()
+
+logging.info(f"
+Train: {len(train):,} rows ({len(train)/len(df)*100:.1f}%)")
+logging.info(f"Valid: {len(valid):,} rows ({len(valid)/len(df)*100:.1f}%)")
+
+# -------------------------
+# 3) Prepare Features and Target
+# -------------------------
+def prepare_features(df_input):
+    """Extract features and target"""
     
-    # Identify feature columns
-    feature_cols = [c for c in df.columns if c not in EXCLUDE_COLS]
+    # Get feature columns
+    feature_cols = [c for c in df_input.columns if c not in EXCLUDE_COLS]
     
-    # Handle categorical features for XGBoost
-    cat_cols = df[feature_cols].select_dtypes(include=['category', 'object']).columns.tolist()
+    X = df_input[feature_cols].copy()
+    y = df_input[TARGET].values
     
-    # For XGBoost, either:
-    # Option A: Label encode categoricals
-    df_features = df[feature_cols].copy()
+    # Handle categorical columns (convert to codes for XGBoost)
+    cat_cols = X.select_dtypes(include=['category']).columns
     for col in cat_cols:
-        if col in df_features.columns:
-            df_features[col] = pd.Categorical(df_features[col]).codes
+        X[col] = X[col].cat.codes
     
-    X = df_features.values
-    y = df[TARGET].values
+    logging.info(f"  Features: {len(feature_cols)}")
+    logging.info(f"  Categorical features converted: {len(cat_cols)}")
     
-    logging.info(f"Features: {X.shape[1]} columns")
-    logging.info(f"Categorical features: {len(cat_cols)}")
-    
-    return X, y, feature_cols
+    return X.values, y, feature_cols
+
+logging.info("
+Preparing training data...")
+X_train, y_train, feature_names = prepare_features(train)
+
+logging.info("Preparing validation data...")
+X_valid, y_valid, _ = prepare_features(valid)
 
 # -------------------------
-# 3) Option A: Standard Training (if data fits in memory)
+# 4) Create XGBoost DMatrix
 # -------------------------
-def train_xgboost_standard():
-    """Standard XGBoost training - use if train+valid < 6GB"""
-    
-    logging.info("
-" + "="*60)
-    logging.info("Training XGBoost - Standard Approach")
-    logging.info("="*60)
-    
-    # Load data
-    logging.info("
-Loading training data...")
-    train = load_data_efficiently("train_full.csv")
-    
-    logging.info("
-Loading validation data...")
-    valid = load_data_efficiently("valid_full.csv")
-    
-    # Prepare features
-    X_train, y_train, feature_names = prepare_features(train)
-    X_valid, y_valid, _ = prepare_features(valid)
-    
-    del train, valid
-    gc.collect()
-    
-    # Create DMatrix (memory-efficient XGBoost data structure)
-    logging.info("
+logging.info("
 Creating DMatrix...")
-    dtrain = xgb.DMatrix(X_train, label=y_train, feature_names=feature_names)
-    dvalid = xgb.DMatrix(X_valid, label=y_valid, feature_names=feature_names)
-    
-    del X_train, y_train, X_valid, y_valid
-    gc.collect()
-    
-    # XGBoost parameters
-    params = {
-        'objective': 'reg:squarederror',
-        'eval_metric': 'rmse',
-        'max_depth': 6,
-        'learning_rate': 0.05,
-        'subsample': 0.8,
-        'colsample_bytree': 0.8,
-        'min_child_weight': 3,
-        'gamma': 0,
-        'reg_alpha': 0.1,
-        'reg_lambda': 1.0,
-        'tree_method': 'hist',  # Memory-efficient histogram-based method
-        'max_bin': 256,
-        'random_state': 42,
-        'n_jobs': -1
-    }
-    
-    # Train model
-    logging.info("
-Training XGBoost model...")
-    evals = [(dtrain, 'train'), (dvalid, 'valid')]
-    
-    model = xgb.train(
-        params,
-        dtrain,
-        num_boost_round=1000,
-        evals=evals,
-        early_stopping_rounds=50,
-        verbose_eval=50
-    )
-    
-    # Save model
-    model_path = os.path.join(MODEL_DIR, "xgboost_demand_forecast.json")
-    model.save_model(model_path)
-    logging.info(f"
+dtrain = xgb.DMatrix(X_train, label=y_train, feature_names=feature_names)
+dvalid = xgb.DMatrix(X_valid, label=y_valid, feature_names=feature_names)
+
+# -------------------------
+# 5) XGBoost Parameters
+# -------------------------
+params = {
+    'objective': 'reg:squarederror',
+    'eval_metric': 'rmse',
+    'max_depth': 6,
+    'learning_rate': 0.05,
+    'subsample': 0.8,
+    'colsample_bytree': 0.8,
+    'min_child_weight': 3,
+    'gamma': 0,
+    'reg_alpha': 0.1,
+    'reg_lambda': 1.0,
+    'tree_method': 'hist',  # Memory-efficient
+    'max_bin': 256,
+    'random_state': 42,
+    'n_jobs': -1
+}
+
+# -------------------------
+# 6) Train Model
+# -------------------------
+logging.info("
+" + "="*60)
+logging.info("Training XGBoost Model")
+logging.info("="*60)
+
+evals = [(dtrain, 'train'), (dvalid, 'valid')]
+
+model = xgb.train(
+    params,
+    dtrain,
+    num_boost_round=1000,
+    evals=evals,
+    early_stopping_rounds=50,
+    verbose_eval=50
+)
+
+# -------------------------
+# 7) Save Model
+# -------------------------
+model_path = os.path.join(MODEL_DIR, "xgboost_batch0.json")
+model.save_model(model_path)
+logging.info(f"
 ✓ Model saved to {model_path}")
-    
-    # Evaluate
-    evaluate_model(model, dvalid, y_valid)
-    
-    return model
 
 # -------------------------
-# 4) Option B: Batch Training with Incremental Learning
+# 8) Evaluate Model
 # -------------------------
-def train_xgboost_incremental():
-    """
-    Incremental XGBoost training for very large datasets
-    Trains on batches sequentially using xgb_model parameter
-    """
-    
-    logging.info("
+logging.info("
 " + "="*60)
-    logging.info("Training XGBoost - Incremental Approach")
-    logging.info("="*60)
-    
-    train_files = sorted(glob.glob(os.path.join(OUTPUT_DIR, "train_batch_*.csv")))
-    
-    if len(train_files) == 0:
-        raise FileNotFoundError("No train batch files found")
-    
-    logging.info(f"Found {len(train_files)} training batches")
-    
-    # Load validation data once
-    logging.info("
-Loading validation data...")
-    valid = load_data_efficiently("valid_batch_*.csv")
-    X_valid, y_valid, feature_names = prepare_features(valid)
-    dvalid = xgb.DMatrix(X_valid, label=y_valid, feature_names=feature_names)
-    del valid, X_valid, y_valid
-    gc.collect()
-    
-    # XGBoost parameters
-    params = {
-        'objective': 'reg:squarederror',
-        'eval_metric': 'rmse',
-        'max_depth': 6,
-        'learning_rate': 0.05,
-        'subsample': 0.8,
-        'colsample_bytree': 0.8,
-        'min_child_weight': 3,
-        'gamma': 0,
-        'reg_alpha': 0.1,
-        'reg_lambda': 1.0,
-        'tree_method': 'hist',
-        'max_bin': 256,
-        'random_state': 42,
-        'n_jobs': -1
-    }
-    
-    model = None
-    
-    # Train incrementally on each batch
-    for batch_idx, train_file in enumerate(train_files):
-        logging.info(f"
-{'='*60}")
-        logging.info(f"Training on batch {batch_idx+1}/{len(train_files)}: {train_file}")
-        logging.info(f"{'='*60}")
-        
-        # Load batch
-        train_batch = pd.read_csv(
-            train_file,
-            dtype={'CUSTOMER_EXTERNAL_CODE': 'category', 'SKU_ERP_CODE': 'category'}
-        )
-        
-        X_train, y_train, feature_names = prepare_features(train_batch)
-        dtrain = xgb.DMatrix(X_train, label=y_train, feature_names=feature_names)
-        
-        del train_batch, X_train, y_train
-        gc.collect()
-        
-        # Train (or continue training from previous batch)
-        evals = [(dtrain, 'train'), (dvalid, 'valid')]
-        
-        model = xgb.train(
-            params,
-            dtrain,
-            num_boost_round=200,  # Fewer rounds per batch
-            evals=evals,
-            early_stopping_rounds=20,
-            verbose_eval=20,
-            xgb_model=model  # Continue from previous model
-        )
-        
-        del dtrain
-        gc.collect()
-    
-    # Save final model
-    model_path = os.path.join(MODEL_DIR, "xgboost_demand_forecast_incremental.json")
-    model.save_model(model_path)
-    logging.info(f"
-✓ Final model saved to {model_path}")
-    
-    # Evaluate
-    y_valid_full = pd.read_csv(glob.glob(os.path.join(OUTPUT_DIR, "valid_batch_*.csv"))[0])[TARGET].values
-    evaluate_model(model, dvalid, y_valid_full)
-    
-    return model
+logging.info("Model Evaluation on Validation Set")
+logging.info("="*60)
+
+y_pred = model.predict(dvalid)
+
+# Metrics
+rmse = np.sqrt(mean_squared_error(y_valid, y_pred))
+mae = mean_absolute_error(y_valid, y_pred)
+r2 = r2_score(y_valid, y_pred)
+
+# MAPE (handle zeros)
+mask = y_valid > 0
+mape = np.mean(np.abs((y_valid[mask] - y_pred[mask]) / y_valid[mask])) * 100 if mask.sum() > 0 else np.nan
+
+logging.info(f"
+RMSE:  {rmse:.4f}")
+logging.info(f"MAE:   {mae:.4f}")
+logging.info(f"R²:    {r2:.4f}")
+logging.info(f"MAPE:  {mape:.2f}%")
+
+# Save metrics
+metrics_df = pd.DataFrame([{
+    'rmse': rmse,
+    'mae': mae,
+    'r2': r2,
+    'mape': mape,
+    'train_rows': len(train),
+    'valid_rows': len(valid)
+}])
+metrics_df.to_csv(os.path.join(MODEL_DIR, "metrics_batch0.csv"), index=False)
 
 # -------------------------
-# 5) Evaluation Function
+# 9) Feature Importance
 # -------------------------
-def evaluate_model(model, dvalid, y_valid):
-    """Evaluate model performance"""
-    
-    logging.info("
-" + "="*60)
-    logging.info("Model Evaluation")
-    logging.info("="*60)
-    
-    # Predictions
-    y_pred = model.predict(dvalid)
-    
-    # Metrics
-    rmse = np.sqrt(mean_squared_error(y_valid, y_pred))
-    mae = mean_absolute_error(y_valid, y_pred)
-    r2 = r2_score(y_valid, y_pred)
-    
-    # MAPE (avoiding division by zero)
-    mape = np.mean(np.abs((y_valid - y_pred) / (y_valid + 1e-9))) * 100
-    
-    logging.info(f"RMSE: {rmse:.4f}")
-    logging.info(f"MAE:  {mae:.4f}")
-    logging.info(f"R²:   {r2:.4f}")
-    logging.info(f"MAPE: {mape:.2f}%")
-    
-    # Save metrics
-    metrics = {
-        'rmse': rmse,
-        'mae': mae,
-        'r2': r2,
-        'mape': mape
-    }
-    
-    pd.DataFrame([metrics]).to_csv(os.path.join(MODEL_DIR, "model_metrics.csv"), index=False)
-    logging.info(f"
-✓ Metrics saved to {MODEL_DIR}/model_metrics.csv")
-    
-    return metrics
+importance = model.get_score(importance_type='gain')
 
-# -------------------------
-# 6) Feature Importance
-# -------------------------
-def save_feature_importance(model, feature_names):
-    """Save feature importance plot and CSV"""
-    
-    importance = model.get_score(importance_type='gain')
-    
-    importance_df = pd.DataFrame({
-        'feature': list(importance.keys()),
-        'importance': list(importance.values())
-    }).sort_values('importance', ascending=False)
-    
-    importance_df.to_csv(os.path.join(MODEL_DIR, "feature_importance.csv"), index=False)
-    logging.info(f"
-✓ Feature importance saved to {MODEL_DIR}/feature_importance.csv")
-    
-    # Display top 20
-    logging.info("
+importance_df = pd.DataFrame({
+    'feature': list(importance.keys()),
+    'importance': list(importance.values())
+}).sort_values('importance', ascending=False)
+
+importance_df.to_csv(os.path.join(MODEL_DIR, "feature_importance_batch0.csv"), index=False)
+
+logging.info("
 Top 20 Important Features:")
-    print(importance_df.head(20).to_string(index=False))
+print(importance_df.head(20).to_string(index=False))
 
 # -------------------------
-# 7) Main Execution
+# 10) Sample Predictions
 # -------------------------
-if __name__ == "__main__":
-    
-    # Choose approach based on your memory constraints
-    USE_INCREMENTAL = False  # Set True if data doesn't fit in memory
-    
-    if USE_INCREMENTAL:
-        # Incremental training for very large datasets
-        model = train_xgboost_incremental()
-    else:
-        # Standard training (faster if data fits in memory)
-        model = train_xgboost_standard()
-    
-    # Save feature importance
-    # save_feature_importance(model, feature_names)  # Uncomment if you stored feature_names
-    
-    logging.info("
+logging.info("
 " + "="*60)
-    logging.info("✓ Training complete!")
-    logging.info("="*60)
+logging.info("Sample Predictions")
+logging.info("="*60)
+
+sample_size = min(20, len(valid))
+sample_idx = np.random.choice(len(valid), sample_size, replace=False)
+
+results = pd.DataFrame({
+    'CUSTOMER': valid.iloc[sample_idx]['CUSTOMER_EXTERNAL_CODE'].values,
+    'SKU': valid.iloc[sample_idx]['SKU_ERP_CODE'].values,
+    'WEEK': valid.iloc[sample_idx]['WEEK_START_DATE'].values,
+    'actual': y_valid[sample_idx],
+    'predicted': y_pred[sample_idx],
+    'error': y_valid[sample_idx] - y_pred[sample_idx]
+})
+
+print(results.to_string(index=False))
+
+results.to_csv(os.path.join(MODEL_DIR, "sample_predictions_batch0.csv"), index=False)
+
+logging.info("
+" + "="*60)
+logging.info("✓ Training Complete!")
+logging.info("="*60)
+logging.info(f"Model saved: {model_path}")
+logging.info(f"Metrics saved: {MODEL_DIR}/metrics_batch0.csv")
+logging.info(f"Feature importance: {MODEL_DIR}/feature_importance_batch0.csv")
