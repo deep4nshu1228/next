@@ -1,0 +1,380 @@
+# =============================================================================
+# XGBoost Demand Forecasting with Pure Polars Lazy Loading (No Pandas)
+# Memory-Efficient for Large Datasets
+# =============================================================================
+
+import polars as pl
+import numpy as np
+import xgboost as xgb
+import logging
+import os
+from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
+import gc
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
+
+# -------------------------
+# 0) Configuration
+# -------------------------
+TRAIN_FILE = "train.parquet"
+VALID_FILE = "valid.parquet"
+MODEL_DIR = "models"
+os.makedirs(MODEL_DIR, exist_ok=True)
+
+TARGET = "TOTAL_QUANTITY"  # Adjust to your target column
+
+# Columns to EXCLUDE from features
+EXCLUDE_COLS = [
+    'WEEK_START_DATE', 'WEEK_END_DATE',
+    'ORDER_IDS', 'ORDER_DATES',
+    'TOTAL_QUANTITY', 'y', 'y_log1p',  # Targets
+    'TOTAL_DLP_VALUE', 'TOTAL_BASE_PRICE', 'BASE_PRICE',
+    'FIRST_NONZERO_WEEK'
+]
+
+# KEEP Customer and SKU as features (critical for demand forecasting)
+
+# -------------------------
+# 1) Load Data with Polars Lazy (Memory Efficient)
+# -------------------------
+logging.info("="*60)
+logging.info("Loading Data with Polars LazyFrame")
+logging.info("="*60)
+
+# Lazy load train
+train_lf = pl.scan_parquet(TRAIN_FILE)
+logging.info(f"Train schema: {train_lf.schema}")
+
+# Lazy load valid
+valid_lf = pl.scan_parquet(VALID_FILE)
+logging.info(f"Valid schema loaded lazily")
+
+# -------------------------
+# 2) Data Quality Checks and Cleaning (Lazy)
+# -------------------------
+logging.info("
+" + "="*60)
+logging.info("Data Quality Checks (Lazy Execution)")
+logging.info("="*60)
+
+# Check target exists
+if TARGET not in train_lf.columns:
+    raise ValueError(f"Target '{TARGET}' not found. Available: {train_lf.columns}")
+
+# Filter out invalid target values (lazy operations)
+train_lf = train_lf.filter(
+    (pl.col(TARGET).is_not_null()) & 
+    (pl.col(TARGET).is_finite()) & 
+    (pl.col(TARGET) >= 0)
+)
+
+valid_lf = valid_lf.filter(
+    (pl.col(TARGET).is_not_null()) & 
+    (pl.col(TARGET).is_finite()) & 
+    (pl.col(TARGET) >= 0)
+)
+
+# Get target statistics (forces collection only for this)
+train_target_stats = train_lf.select(pl.col(TARGET)).collect().describe()
+logging.info(f"
+Train target statistics:")
+print(train_target_stats)
+
+valid_target_stats = valid_lf.select(pl.col(TARGET)).collect().describe()
+logging.info(f"
+Valid target statistics:")
+print(valid_target_stats)
+
+# -------------------------
+# 3) Identify Feature Columns
+# -------------------------
+all_cols = train_lf.columns
+feature_cols = [c for c in all_cols if c not in EXCLUDE_COLS]
+
+logging.info(f"
+" + "="*60)
+logging.info("Feature Selection")
+logging.info("="*60)
+logging.info(f"Total features: {len(feature_cols)}")
+logging.info(f"Sample features: {feature_cols[:15]}...")
+
+# -------------------------
+# 4) Prepare Features (Lazy + Efficient Collection)
+# -------------------------
+def prepare_lazy_data_for_xgboost(lf, feature_cols, target_col):
+    """
+    Prepare data using Polars lazy operations, collect efficiently
+    No pandas conversion
+    """
+    
+    # Select only needed columns (lazy)
+    lf_selected = lf.select(feature_cols + [target_col])
+    
+    # Encode categorical columns to integers (lazy)
+    cat_cols = []
+    for col in feature_cols:
+        dtype = lf_selected.schema[col]
+        if dtype in [pl.Utf8, pl.Categorical]:
+            cat_cols.append(col)
+            # Cast categorical to integer codes
+            lf_selected = lf_selected.with_columns(
+                pl.col(col).cast(pl.Categorical).to_physical().alias(col)
+            )
+    
+    logging.info(f"  Categorical columns encoded: {cat_cols}")
+    
+    # Fill nulls and infinities in numeric columns (lazy)
+    for col in feature_cols:
+        dtype = lf_selected.schema[col]
+        if dtype in [pl.Float32, pl.Float64, pl.Int32, pl.Int64]:
+            lf_selected = lf_selected.with_columns(
+                pl.col(col).fill_null(0).fill_nan(0).alias(col)
+            )
+    
+    # NOW collect to memory (single efficient operation)
+    logging.info("  Collecting data to memory...")
+    df_collected = lf_selected.collect()
+    
+    logging.info(f"  Collected shape: {df_collected.shape}")
+    
+    # Extract features and target as numpy arrays
+    X = df_collected.select(feature_cols).to_numpy()
+    y = df_collected.select(target_col).to_numpy().flatten()
+    
+    logging.info(f"  Final shape: X={X.shape}, y={y.shape}")
+    
+    return X, y, df_collected
+
+logging.info("
+" + "="*60)
+logging.info("Preparing Training Data")
+logging.info("="*60)
+X_train, y_train, train_collected = prepare_lazy_data_for_xgboost(train_lf, feature_cols, TARGET)
+
+logging.info("
+" + "="*60)
+logging.info("Preparing Validation Data")
+logging.info("="*60)
+X_valid, y_valid, valid_collected = prepare_lazy_data_for_xgboost(valid_lf, feature_cols, TARGET)
+
+# Save validation identifiers for analysis (using Polars)
+valid_ids = valid_collected.select(['CUSTOMER_EXTERNAL_CODE', 'SKU_ERP_CODE', 'WEEK_START_DATE'])
+
+logging.info(f"
+Data loaded:")
+logging.info(f"  Train: {X_train.shape[0]:,} rows, {X_train.shape[1]} features")
+logging.info(f"  Valid: {X_valid.shape[0]:,} rows")
+
+# Free memory
+del train_lf, valid_lf, train_collected
+gc.collect()
+
+# -------------------------
+# 5) Create XGBoost DMatrix
+# -------------------------
+logging.info("
+" + "="*60)
+logging.info("Creating XGBoost DMatrix")
+logging.info("="*60)
+
+dtrain = xgb.DMatrix(X_train, label=y_train, feature_names=feature_cols)
+dvalid = xgb.DMatrix(X_valid, label=y_valid, feature_names=feature_cols)
+
+logging.info(f"Train DMatrix: {dtrain.num_row():,} rows, {dtrain.num_col()} features")
+logging.info(f"Valid DMatrix: {dvalid.num_row():,} rows")
+
+del X_train, X_valid
+gc.collect()
+
+# -------------------------
+# 6) XGBoost Parameters
+# -------------------------
+params = {
+    'objective': 'reg:squarederror',
+    'eval_metric': ['rmse', 'mae'],
+    'max_depth': 6,
+    'learning_rate': 0.05,
+    'subsample': 0.8,
+    'colsample_bytree': 0.8,
+    'min_child_weight': 5,
+    'gamma': 0.5,
+    'reg_alpha': 1.0,
+    'reg_lambda': 2.0,
+    'tree_method': 'hist',  # Memory-efficient
+    'max_bin': 256,
+    'random_state': 42,
+    'n_jobs': -1
+}
+
+logging.info("
+" + "="*60)
+logging.info("XGBoost Parameters")
+logging.info("="*60)
+for k, v in params.items():
+    logging.info(f"  {k}: {v}")
+
+# -------------------------
+# 7) Train Model
+# -------------------------
+logging.info("
+" + "="*60)
+logging.info("Training XGBoost Model")
+logging.info("="*60)
+
+evals = [(dtrain, 'train'), (dvalid, 'valid')]
+evals_result = {}
+
+model = xgb.train(
+    params,
+    dtrain,
+    num_boost_round=1500,
+    evals=evals,
+    early_stopping_rounds=50,
+    verbose_eval=50,
+    evals_result=evals_result
+)
+
+best_iteration = model.best_iteration
+logging.info(f"
+✓ Training complete. Best iteration: {best_iteration}")
+
+# -------------------------
+# 8) Save Model
+# -------------------------
+model_path = os.path.join(MODEL_DIR, "xgboost_demand_forecast.json")
+model.save_model(model_path)
+logging.info(f"✓ Model saved to {model_path}")
+
+# -------------------------
+# 9) Evaluate Model
+# -------------------------
+logging.info("
+" + "="*60)
+logging.info("Model Evaluation")
+logging.info("="*60)
+
+y_pred = model.predict(dvalid)
+
+# Clip negative predictions
+y_pred = np.clip(y_pred, 0, None)
+
+# Calculate metrics
+rmse = np.sqrt(mean_squared_error(y_valid, y_pred))
+mae = mean_absolute_error(y_valid, y_pred)
+r2 = r2_score(y_valid, y_pred)
+
+# MAPE (handle zeros)
+mask = y_valid > 0
+mape = np.mean(np.abs((y_valid[mask] - y_pred[mask]) / y_valid[mask])) * 100 if mask.sum() > 0 else np.nan
+
+# Baseline comparison
+y_pred_baseline = np.full(len(y_valid), y_train.mean())
+baseline_rmse = np.sqrt(mean_squared_error(y_valid, y_pred_baseline))
+baseline_r2 = r2_score(y_valid, y_pred_baseline)
+
+logging.info(f"
+Model Performance:")
+logging.info(f"  RMSE:  {rmse:.4f}")
+logging.info(f"  MAE:   {mae:.4f}")
+logging.info(f"  R²:    {r2:.4f}")
+logging.info(f"  MAPE:  {mape:.2f}%")
+logging.info(f"
+Baseline (mean prediction):")
+logging.info(f"  RMSE:  {baseline_rmse:.4f}")
+logging.info(f"  R²:    {baseline_r2:.4f}")
+logging.info(f"
+Improvement over baseline: {r2 - baseline_r2:.4f}")
+
+# Save metrics using Polars
+metrics_pl = pl.DataFrame({
+    'rmse': [rmse],
+    'mae': [mae],
+    'r2': [r2],
+    'mape': [mape],
+    'baseline_rmse': [baseline_rmse],
+    'baseline_r2': [baseline_r2],
+    'improvement': [r2 - baseline_r2],
+    'best_iteration': [best_iteration],
+    'train_rows': [len(y_train)],
+    'valid_rows': [len(y_valid)]
+})
+metrics_pl.write_csv(os.path.join(MODEL_DIR, "model_metrics.csv"))
+logging.info(f"
+✓ Metrics saved to {MODEL_DIR}/model_metrics.csv")
+
+# -------------------------
+# 10) Feature Importance
+# -------------------------
+logging.info("
+" + "="*60)
+logging.info("Feature Importance")
+logging.info("="*60)
+
+importance = model.get_score(importance_type='gain')
+
+# Create Polars DataFrame for importance
+importance_pl = pl.DataFrame({
+    'feature': list(importance.keys()),
+    'importance': list(importance.values())
+}).sort('importance', descending=True)
+
+logging.info("
+Top 25 Important Features:")
+print(importance_pl.head(25))
+
+importance_pl.write_csv(os.path.join(MODEL_DIR, "feature_importance.csv"))
+logging.info(f"✓ Feature importance saved to {MODEL_DIR}/feature_importance.csv")
+
+# -------------------------
+# 11) Sample Predictions Analysis
+# -------------------------
+logging.info("
+" + "="*60)
+logging.info("Sample Predictions Analysis")
+logging.info("="*60)
+
+sample_size = min(30, len(valid_ids))
+sample_idx = np.random.choice(len(valid_ids), sample_size, replace=False)
+
+# Create predictions DataFrame with Polars
+results_pl = pl.DataFrame({
+    'CUSTOMER': valid_ids['CUSTOMER_EXTERNAL_CODE'].to_numpy()[sample_idx],
+    'SKU': valid_ids['SKU_ERP_CODE'].to_numpy()[sample_idx],
+    'WEEK': valid_ids['WEEK_START_DATE'].to_numpy()[sample_idx],
+    'actual': y_valid[sample_idx],
+    'predicted': y_pred[sample_idx],
+    'error': y_valid[sample_idx] - y_pred[sample_idx],
+    'abs_pct_error': np.abs((y_valid[sample_idx] - y_pred[sample_idx]) / (y_valid[sample_idx] + 1e-9)) * 100
+})
+
+logging.info("
+Sample Predictions:")
+print(results_pl)
+
+results_pl.write_csv(os.path.join(MODEL_DIR, "sample_predictions.csv"))
+logging.info(f"✓ Sample predictions saved to {MODEL_DIR}/sample_predictions.csv")
+
+# -------------------------
+# 12) Prediction Distribution Analysis
+# -------------------------
+logging.info("
+" + "="*60)
+logging.info("Prediction Distribution")
+logging.info("="*60)
+
+logging.info(f"Actual   - min: {y_valid.min():.2f}, mean: {y_valid.mean():.2f}, max: {y_valid.max():.2f}")
+logging.info(f"Predicted - min: {y_pred.min():.2f}, mean: {y_pred.mean():.2f}, max: {y_pred.max():.2f}")
+
+# -------------------------
+# 13) Summary
+# -------------------------
+logging.info("
+" + "="*60)
+logging.info("✓ Training Complete! (Pure Polars - Zero Pandas)")
+logging.info("="*60)
+logging.info(f"Model: {model_path}")
+logging.info(f"Best iteration: {best_iteration}")
+logging.info(f"Validation R²: {r2:.4f}")
+logging.info(f"Validation RMSE: {rmse:.4f}")
+logging.info(f"Memory efficiency: Lazy loading used throughout")
+logging.info("="*60)
