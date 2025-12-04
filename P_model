@@ -22,62 +22,67 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(
 
 def prepare_ensemble_data_polars(df_polars, target_col='TOTAL_QUANTITY'):
     """
-    Convert Polars DataFrame to format suitable for all models
-    Memory efficient - no pandas conversion until necessary
+    Prepare data for ensemble models with proper categorical handling
+    Returns both encoded and original data for different model types
     """
     
     # Identify categorical columns
     cat_features = ['CUSTOMER_EXTERNAL_CODE', 'SKU_ERP_CODE']
     
-    # Encode categoricals to integers
-    df_encoded = df_polars.clone()
-    for col in cat_features:
-        df_encoded = df_encoded.with_columns(
-            pl.col(col).cast(pl.Categorical).to_physical().alias(col)
-        )
-    
     # Define feature columns
     exclude_cols = [
         target_col, 'WEEK_START_DATE', 'WEEK_END_DATE',
         'ORDER_IDS', 'ORDER_DATES', 'y', 'y_log1p',
-        'TOTAL_DLP_VALUE', 'TOTAL_BASE_PRICE'
+        'TOTAL_DLP_VALUE', 'TOTAL_BASE_PRICE', 'BASE_PRICE'
     ]
     
-    feature_cols = [c for c in df_encoded.columns if c not in exclude_cols]
+    all_feature_cols = [c for c in df_polars.columns if c not in exclude_cols]
     
-    # Extract features and target as numpy
-    X = df_encoded.select(feature_cols).to_numpy()
-    y = df_encoded.select(target_col).to_numpy().flatten()
+    # Create encoded version (for XGBoost, LightGBM, Ridge)
+    df_encoded = df_polars.clone()
+    for col in cat_features:
+        if col in df_encoded.columns:
+            df_encoded = df_encoded.with_columns(
+                pl.col(col).cast(pl.Categorical).to_physical().alias(col)
+            )
     
-    # Get categorical indices
-    cat_indices = [feature_cols.index(col) for col in cat_features if col in feature_cols]
+    # Get features and target
+    feature_cols = [c for c in all_feature_cols if c in df_encoded.columns]
     
-    # Keep categorical data for CatBoost (original values)
-    cat_data = df_polars.select(cat_features)
+    # Extract as numpy (ENSURE FLOAT TYPE)
+    X_encoded = df_encoded.select(feature_cols).to_numpy().astype(np.float32)
+    y = df_encoded.select(target_col).to_numpy().flatten().astype(np.float32)
     
-    logging.info(f"Features shape: {X.shape}, Target shape: {y.shape}")
-    logging.info(f"Feature columns: {len(feature_cols)}, Categorical indices: {cat_indices}")
+    # Get categorical column indices
+    cat_indices = [i for i, col in enumerate(feature_cols) if col in cat_features]
     
-    return X, y, feature_cols, cat_indices, cat_data
-
-# =============================================================================
-# STEP 2: Ensemble Class (Polars-Compatible)
-# =============================================================================
+    # For CatBoost: Keep original categorical values as strings
+    X_catboost = df_polars.select(feature_cols).to_numpy()
+    
+    # Convert categoricals to string for CatBoost
+    for idx in cat_indices:
+        X_catboost[:, idx] = X_catboost[:, idx].astype(str)
+    
+    logging.info(f"Encoded features: {X_encoded.shape}, dtype: {X_encoded.dtype}")
+    logging.info(f"CatBoost features: {X_catboost.shape}")
+    logging.info(f"Target: {y.shape}, dtype: {y.dtype}")
+    logging.info(f"Categorical indices: {cat_indices}")
+    
+    return X_encoded, X_catboost, y, feature_cols, cat_indices
 
 class PolarsEnsembleForecaster:
     """
-    Ensemble forecaster optimized for Polars DataFrames
-    No pandas dependencies - pure Polars + NumPy
+    Fixed ensemble forecaster with proper data type handling
     """
     
     def __init__(self):
         self.models = {}
         self.weights = None
         self.feature_names = None
-        self.predictions_cache = {}
+        self.cat_indices = None
         
     def train_xgboost(self, X_train, y_train, X_valid, y_valid):
-        """Train XGBoost model"""
+        """Train XGBoost (uses encoded data)"""
         logging.info("\n" + "="*60)
         logging.info("Training XGBoost...")
         logging.info("="*60)
@@ -96,6 +101,12 @@ class PolarsEnsembleForecaster:
             'random_state': 42
         }
         
+        # Ensure float32
+        X_train = X_train.astype(np.float32)
+        X_valid = X_valid.astype(np.float32)
+        y_train = y_train.astype(np.float32)
+        y_valid = y_valid.astype(np.float32)
+        
         dtrain = xgb.DMatrix(X_train, label=y_train, feature_names=self.feature_names)
         dvalid = xgb.DMatrix(X_valid, label=y_valid, feature_names=self.feature_names)
         
@@ -108,10 +119,7 @@ class PolarsEnsembleForecaster:
             verbose_eval=100
         )
         
-        # Predictions
         valid_pred = model.predict(dvalid)
-        
-        # Metrics
         valid_rmse = np.sqrt(mean_squared_error(y_valid, valid_pred))
         valid_r2 = r2_score(y_valid, valid_pred)
         
@@ -121,7 +129,7 @@ class PolarsEnsembleForecaster:
         return valid_pred
     
     def train_lightgbm(self, X_train, y_train, X_valid, y_valid):
-        """Train LightGBM model"""
+        """Train LightGBM (uses encoded data)"""
         logging.info("\n" + "="*60)
         logging.info("Training LightGBM...")
         logging.info("="*60)
@@ -142,6 +150,12 @@ class PolarsEnsembleForecaster:
             'random_state': 42
         }
         
+        # Ensure float32
+        X_train = X_train.astype(np.float32)
+        X_valid = X_valid.astype(np.float32)
+        y_train = y_train.astype(np.float32)
+        y_valid = y_valid.astype(np.float32)
+        
         lgb_train = lgb.Dataset(X_train, label=y_train, feature_name=self.feature_names)
         lgb_valid = lgb.Dataset(X_valid, label=y_valid, reference=lgb_train)
         
@@ -154,10 +168,7 @@ class PolarsEnsembleForecaster:
             callbacks=[lgb.early_stopping(50), lgb.log_evaluation(100)]
         )
         
-        # Predictions
         valid_pred = model.predict(X_valid)
-        
-        # Metrics
         valid_rmse = np.sqrt(mean_squared_error(y_valid, valid_pred))
         valid_r2 = r2_score(y_valid, valid_pred)
         
@@ -166,12 +177,13 @@ class PolarsEnsembleForecaster:
         self.models['lightgbm'] = model
         return valid_pred
     
-    def train_catboost(self, X_train, y_train, X_valid, y_valid, cat_indices):
-        """Train CatBoost model"""
+    def train_catboost(self, X_train_cat, y_train, X_valid_cat, y_valid, cat_indices):
+        """Train CatBoost (uses original categorical data)"""
         logging.info("\n" + "="*60)
         logging.info("Training CatBoost...")
         logging.info("="*60)
         
+        # CatBoost handles categoricals internally
         model = CatBoostRegressor(
             iterations=600,
             depth=5,
@@ -188,15 +200,12 @@ class PolarsEnsembleForecaster:
         )
         
         model.fit(
-            X_train, y_train,
-            eval_set=(X_valid, y_valid),
+            X_train_cat, y_train,
+            eval_set=(X_valid_cat, y_valid),
             use_best_model=True
         )
         
-        # Predictions
-        valid_pred = model.predict(X_valid)
-        
-        # Metrics
+        valid_pred = model.predict(X_valid_cat)
         valid_rmse = np.sqrt(mean_squared_error(y_valid, valid_pred))
         valid_r2 = r2_score(y_valid, valid_pred)
         
@@ -206,10 +215,16 @@ class PolarsEnsembleForecaster:
         return valid_pred
     
     def train_ridge(self, X_train, y_train, X_valid, y_valid):
-        """Train Ridge regression"""
+        """Train Ridge (uses encoded data)"""
         logging.info("\n" + "="*60)
         logging.info("Training Ridge Regression...")
         logging.info("="*60)
+        
+        # Ensure float32
+        X_train = X_train.astype(np.float32)
+        X_valid = X_valid.astype(np.float32)
+        y_train = y_train.astype(np.float32)
+        y_valid = y_valid.astype(np.float32)
         
         # Cross-validate alpha
         alphas = [0.1, 1.0, 10.0, 50.0, 100.0]
@@ -226,14 +241,10 @@ class PolarsEnsembleForecaster:
                 best_score = rmse
                 best_alpha = alpha
         
-        # Train final model
         model = Ridge(alpha=best_alpha, random_state=42)
         model.fit(X_train, y_train)
         
-        # Predictions
         valid_pred = model.predict(X_valid)
-        
-        # Metrics
         valid_rmse = np.sqrt(mean_squared_error(y_valid, valid_pred))
         valid_r2 = r2_score(y_valid, valid_pred)
         
@@ -242,22 +253,44 @@ class PolarsEnsembleForecaster:
         self.models['ridge'] = model
         return valid_pred
     
-    def fit(self, X_train, y_train, X_valid, y_valid, feature_names, cat_indices=None):
-        """Train all models"""
+    def fit(self, X_train_encoded, X_train_catboost, y_train, 
+            X_valid_encoded, X_valid_catboost, y_valid, 
+            feature_names, cat_indices=None):
+        """
+        Train all models with proper data types
+        
+        Args:
+            X_train_encoded: Encoded features for XGBoost/LightGBM/Ridge
+            X_train_catboost: Original categorical features for CatBoost
+            y_train: Training target
+            X_valid_encoded: Validation encoded features
+            X_valid_catboost: Validation categorical features
+            y_valid: Validation target
+            feature_names: Feature names
+            cat_indices: Categorical column indices
+        """
         
         self.feature_names = feature_names
+        self.cat_indices = cat_indices
         
-        # Store validation predictions
         predictions = {}
         
-        # Train each model
-        predictions['xgboost'] = self.train_xgboost(X_train, y_train, X_valid, y_valid)
-        predictions['lightgbm'] = self.train_lightgbm(X_train, y_train, X_valid, y_valid)
-        predictions['catboost'] = self.train_catboost(X_train, y_train, X_valid, y_valid, cat_indices or [])
-        predictions['ridge'] = self.train_ridge(X_train, y_train, X_valid, y_valid)
+        # Train models with appropriate data
+        predictions['xgboost'] = self.train_xgboost(
+            X_train_encoded, y_train, X_valid_encoded, y_valid
+        )
         
-        # Cache predictions
-        self.predictions_cache = predictions
+        predictions['lightgbm'] = self.train_lightgbm(
+            X_train_encoded, y_train, X_valid_encoded, y_valid
+        )
+        
+        predictions['catboost'] = self.train_catboost(
+            X_train_catboost, y_train, X_valid_catboost, y_valid, cat_indices
+        )
+        
+        predictions['ridge'] = self.train_ridge(
+            X_train_encoded, y_train, X_valid_encoded, y_valid
+        )
         
         return predictions
     
@@ -267,17 +300,14 @@ class PolarsEnsembleForecaster:
         logging.info("Optimizing Ensemble Weights...")
         logging.info("="*60)
         
-        # Stack predictions
         pred_matrix = np.column_stack([predictions[name] for name in predictions.keys()])
         n_models = pred_matrix.shape[1]
         
-        # Objective: minimize RMSE
         def objective(weights):
             weights = weights / weights.sum()
             ensemble_pred = pred_matrix @ weights
             return np.sqrt(mean_squared_error(y_true, ensemble_pred))
         
-        # Optimize
         result = minimize(
             objective,
             x0=np.ones(n_models) / n_models,
@@ -287,8 +317,6 @@ class PolarsEnsembleForecaster:
         )
         
         optimal_weights = result.x
-        
-        # Store weights
         self.weights = dict(zip(predictions.keys(), optimal_weights))
         
         logging.info("\nOptimal Weights:")
@@ -297,46 +325,48 @@ class PolarsEnsembleForecaster:
         
         return optimal_weights
     
-    def predict(self, X, method='weighted'):
-        """Make predictions"""
+    def predict(self, X_encoded, X_catboost, method='weighted'):
+        """
+        Make predictions
+        
+        Args:
+            X_encoded: Encoded features for XGBoost/LightGBM/Ridge
+            X_catboost: Categorical features for CatBoost
+            method: Ensemble method
+        """
         
         predictions = {}
         
-        # Get predictions from each model
         if 'xgboost' in self.models:
-            dmatrix = xgb.DMatrix(X, feature_names=self.feature_names)
+            dmatrix = xgb.DMatrix(X_encoded.astype(np.float32), feature_names=self.feature_names)
             predictions['xgboost'] = self.models['xgboost'].predict(dmatrix)
         
         if 'lightgbm' in self.models:
-            predictions['lightgbm'] = self.models['lightgbm'].predict(X)
+            predictions['lightgbm'] = self.models['lightgbm'].predict(X_encoded.astype(np.float32))
         
         if 'catboost' in self.models:
-            predictions['catboost'] = self.models['catboost'].predict(X)
+            predictions['catboost'] = self.models['catboost'].predict(X_catboost)
         
         if 'ridge' in self.models:
-            predictions['ridge'] = self.models['ridge'].predict(X)
+            predictions['ridge'] = self.models['ridge'].predict(X_encoded.astype(np.float32))
         
-        # Combine predictions
         pred_matrix = np.column_stack([predictions[name] for name in predictions.keys()])
         
         if method == 'simple':
             return pred_matrix.mean(axis=1)
         elif method == 'weighted':
-            if self.weights is None:
-                raise ValueError("Weights not optimized. Run optimize_weights first.")
             weights = np.array([self.weights[name] for name in predictions.keys()])
             return pred_matrix @ weights
         elif method == 'median':
             return np.median(pred_matrix, axis=1)
-        else:
-            raise ValueError(f"Unknown method: {method}")
     
     def save(self, filepath):
         """Save ensemble"""
         joblib.dump({
             'models': self.models,
             'weights': self.weights,
-            'feature_names': self.feature_names
+            'feature_names': self.feature_names,
+            'cat_indices': self.cat_indices
         }, filepath)
         logging.info(f"✓ Ensemble saved to {filepath}")
     
@@ -346,6 +376,7 @@ class PolarsEnsembleForecaster:
         self.models = data['models']
         self.weights = data['weights']
         self.feature_names = data['feature_names']
+        self.cat_indices = data.get('cat_indices', None)
         logging.info(f"✓ Ensemble loaded from {filepath}")
 
 # =============================================================================
@@ -354,35 +385,35 @@ class PolarsEnsembleForecaster:
 
 def train_ensemble_pipeline(train_df_polars, valid_df_polars, target_col='TOTAL_QUANTITY'):
     """
-    Complete ensemble training pipeline using Polars DataFrames
+    Complete ensemble training pipeline with fixed data handling
     """
     
     logging.info("\n" + "="*80)
-    logging.info("ENSEMBLE TRAINING PIPELINE (POLARS)")
+    logging.info("ENSEMBLE TRAINING PIPELINE (FIXED)")
     logging.info("="*80)
     
-    # Prepare data
+    # Prepare data (returns both encoded and categorical versions)
     logging.info("\nPreparing training data...")
-    X_train, y_train, feature_names, cat_indices, _ = prepare_ensemble_data_polars(
+    X_train_enc, X_train_cat, y_train, feature_names, cat_indices = prepare_ensemble_data_polars(
         train_df_polars, target_col
     )
     
     logging.info("Preparing validation data...")
-    X_valid, y_valid, _, _, _ = prepare_ensemble_data_polars(
+    X_valid_enc, X_valid_cat, y_valid, _, _ = prepare_ensemble_data_polars(
         valid_df_polars, target_col
     )
     
     # Initialize ensemble
     ensemble = PolarsEnsembleForecaster()
     
-    # Train all models
+    # Train all models (passing both data versions)
     logging.info("\n" + "="*80)
     logging.info("TRAINING MODELS")
     logging.info("="*80)
     
     predictions = ensemble.fit(
-        X_train, y_train,
-        X_valid, y_valid,
+        X_train_enc, X_train_cat, y_train,
+        X_valid_enc, X_valid_cat, y_valid,
         feature_names=feature_names,
         cat_indices=cat_indices
     )
