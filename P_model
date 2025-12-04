@@ -1,15 +1,14 @@
 # =============================================================================
-# COMPLETE ENSEMBLE MODELING FOR DEMAND FORECASTING
-# Combines XGBoost + LightGBM + CatBoost + Ridge for Maximum Accuracy
+# ENSEMBLE MODELING WITH POLARS (NO PANDAS) - MEMORY EFFICIENT
+# XGBoost + LightGBM + CatBoost + Ridge for Demand Forecasting
 # =============================================================================
 
+import polars as pl
 import numpy as np
-import pandas as pd
 import xgboost as xgb
 import lightgbm as lgb
 from catboost import CatBoostRegressor
-from sklearn.linear_model import Ridge, Lasso
-from sklearn.ensemble import RandomForestRegressor
+from sklearn.linear_model import Ridge
 from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
 from scipy.optimize import minimize
 import joblib
@@ -18,59 +17,64 @@ import logging
 logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
 
 # =============================================================================
-# STEP 1: Prepare Data
+# STEP 1: Prepare Data (Pure Polars)
 # =============================================================================
 
-def prepare_ensemble_data(df_snowpark):
+def prepare_ensemble_data_polars(df_polars, target_col='TOTAL_QUANTITY'):
     """
-    Convert Snowpark DataFrame to format suitable for all models
+    Convert Polars DataFrame to format suitable for all models
+    Memory efficient - no pandas conversion until necessary
     """
-    
-    # Convert to pandas
-    df = df_snowpark.to_pandas()
     
     # Identify categorical columns
     cat_features = ['CUSTOMER_EXTERNAL_CODE', 'SKU_ERP_CODE']
     
-    # Encode categoricals for XGBoost/LightGBM/Ridge
-    df_encoded = df.copy()
+    # Encode categoricals to integers
+    df_encoded = df_polars.clone()
     for col in cat_features:
-        df_encoded[col] = pd.Categorical(df_encoded[col]).codes
+        df_encoded = df_encoded.with_columns(
+            pl.col(col).cast(pl.Categorical).to_physical().alias(col)
+        )
     
-    # Split features and target
-    feature_cols = [c for c in df.columns if c not in [
-        'TOTAL_QUANTITY', 'WEEK_START_DATE', 'WEEK_END_DATE',
-        'ORDER_IDS', 'ORDER_DATES', 'y', 'y_log1p'
-    ]]
+    # Define feature columns
+    exclude_cols = [
+        target_col, 'WEEK_START_DATE', 'WEEK_END_DATE',
+        'ORDER_IDS', 'ORDER_DATES', 'y', 'y_log1p',
+        'TOTAL_DLP_VALUE', 'TOTAL_BASE_PRICE'
+    ]
     
-    X = df_encoded[feature_cols].values
-    y = df['TOTAL_QUANTITY'].values
+    feature_cols = [c for c in df_encoded.columns if c not in exclude_cols]
     
-    # Keep categorical indices for CatBoost
+    # Extract features and target as numpy
+    X = df_encoded.select(feature_cols).to_numpy()
+    y = df_encoded.select(target_col).to_numpy().flatten()
+    
+    # Get categorical indices
     cat_indices = [feature_cols.index(col) for col in cat_features if col in feature_cols]
     
-    return X, y, feature_cols, cat_indices, df[cat_features]
-
-# Assuming you have train/valid data ready
-logging.info("Preparing data...")
-X_train, y_train, feature_names, cat_indices, cat_train = prepare_ensemble_data(train_df)
-X_valid, y_valid, _, _, cat_valid = prepare_ensemble_data(valid_df)
-
-logging.info(f"Train: {X_train.shape}, Valid: {X_valid.shape}")
+    # Keep categorical data for CatBoost (original values)
+    cat_data = df_polars.select(cat_features)
+    
+    logging.info(f"Features shape: {X.shape}, Target shape: {y.shape}")
+    logging.info(f"Feature columns: {len(feature_cols)}, Categorical indices: {cat_indices}")
+    
+    return X, y, feature_cols, cat_indices, cat_data
 
 # =============================================================================
-# STEP 2: Train Individual Models
+# STEP 2: Ensemble Class (Polars-Compatible)
 # =============================================================================
 
-class EnsembleForecaster:
+class PolarsEnsembleForecaster:
     """
-    Ensemble of multiple models for demand forecasting
+    Ensemble forecaster optimized for Polars DataFrames
+    No pandas dependencies - pure Polars + NumPy
     """
     
     def __init__(self):
         self.models = {}
         self.weights = None
         self.feature_names = None
+        self.predictions_cache = {}
         
     def train_xgboost(self, X_train, y_train, X_valid, y_valid):
         """Train XGBoost model"""
@@ -105,15 +109,13 @@ class EnsembleForecaster:
         )
         
         # Predictions
-        train_pred = model.predict(dtrain)
         valid_pred = model.predict(dvalid)
         
         # Metrics
-        train_rmse = np.sqrt(mean_squared_error(y_train, train_pred))
         valid_rmse = np.sqrt(mean_squared_error(y_valid, valid_pred))
         valid_r2 = r2_score(y_valid, valid_pred)
         
-        logging.info(f"XGBoost - Train RMSE: {train_rmse:.4f}, Valid RMSE: {valid_rmse:.4f}, Valid R²: {valid_r2:.4f}")
+        logging.info(f"XGBoost - Valid RMSE: {valid_rmse:.4f}, Valid R²: {valid_r2:.4f}")
         
         self.models['xgboost'] = model
         return valid_pred
@@ -153,15 +155,13 @@ class EnsembleForecaster:
         )
         
         # Predictions
-        train_pred = model.predict(X_train)
         valid_pred = model.predict(X_valid)
         
         # Metrics
-        train_rmse = np.sqrt(mean_squared_error(y_train, train_pred))
         valid_rmse = np.sqrt(mean_squared_error(y_valid, valid_pred))
         valid_r2 = r2_score(y_valid, valid_pred)
         
-        logging.info(f"LightGBM - Train RMSE: {train_rmse:.4f}, Valid RMSE: {valid_rmse:.4f}, Valid R²: {valid_r2:.4f}")
+        logging.info(f"LightGBM - Valid RMSE: {valid_rmse:.4f}, Valid R²: {valid_r2:.4f}")
         
         self.models['lightgbm'] = model
         return valid_pred
@@ -178,8 +178,8 @@ class EnsembleForecaster:
             learning_rate=0.03,
             l2_leaf_reg=3.0,
             subsample=0.8,
-            rsm=0.8,  # colsample_bytree equivalent
-            cat_features=cat_indices,
+            rsm=0.8,
+            cat_features=cat_indices if cat_indices else None,
             loss_function='RMSE',
             eval_metric='RMSE',
             random_seed=42,
@@ -194,26 +194,24 @@ class EnsembleForecaster:
         )
         
         # Predictions
-        train_pred = model.predict(X_train)
         valid_pred = model.predict(X_valid)
         
         # Metrics
-        train_rmse = np.sqrt(mean_squared_error(y_train, train_pred))
         valid_rmse = np.sqrt(mean_squared_error(y_valid, valid_pred))
         valid_r2 = r2_score(y_valid, valid_pred)
         
-        logging.info(f"CatBoost - Train RMSE: {train_rmse:.4f}, Valid RMSE: {valid_rmse:.4f}, Valid R²: {valid_r2:.4f}")
+        logging.info(f"CatBoost - Valid RMSE: {valid_rmse:.4f}, Valid R²: {valid_r2:.4f}")
         
         self.models['catboost'] = model
         return valid_pred
     
     def train_ridge(self, X_train, y_train, X_valid, y_valid):
-        """Train Ridge regression (captures linear patterns)"""
+        """Train Ridge regression"""
         logging.info("\n" + "="*60)
         logging.info("Training Ridge Regression...")
         logging.info("="*60)
         
-        # Try multiple alpha values
+        # Cross-validate alpha
         alphas = [0.1, 1.0, 10.0, 50.0, 100.0]
         best_score = float('inf')
         best_alpha = None
@@ -228,54 +226,20 @@ class EnsembleForecaster:
                 best_score = rmse
                 best_alpha = alpha
         
-        # Train with best alpha
+        # Train final model
         model = Ridge(alpha=best_alpha, random_state=42)
         model.fit(X_train, y_train)
         
         # Predictions
-        train_pred = model.predict(X_train)
         valid_pred = model.predict(X_valid)
         
         # Metrics
-        train_rmse = np.sqrt(mean_squared_error(y_train, train_pred))
         valid_rmse = np.sqrt(mean_squared_error(y_valid, valid_pred))
         valid_r2 = r2_score(y_valid, valid_pred)
         
-        logging.info(f"Ridge (α={best_alpha}) - Train RMSE: {train_rmse:.4f}, Valid RMSE: {valid_rmse:.4f}, Valid R²: {valid_r2:.4f}")
+        logging.info(f"Ridge (α={best_alpha}) - Valid RMSE: {valid_rmse:.4f}, Valid R²: {valid_r2:.4f}")
         
         self.models['ridge'] = model
-        return valid_pred
-    
-    def train_random_forest(self, X_train, y_train, X_valid, y_valid):
-        """Train Random Forest (optional 5th model)"""
-        logging.info("\n" + "="*60)
-        logging.info("Training Random Forest...")
-        logging.info("="*60)
-        
-        model = RandomForestRegressor(
-            n_estimators=200,
-            max_depth=10,
-            min_samples_split=20,
-            min_samples_leaf=10,
-            max_features='sqrt',
-            n_jobs=-1,
-            random_state=42
-        )
-        
-        model.fit(X_train, y_train)
-        
-        # Predictions
-        train_pred = model.predict(X_train)
-        valid_pred = model.predict(X_valid)
-        
-        # Metrics
-        train_rmse = np.sqrt(mean_squared_error(y_train, train_pred))
-        valid_rmse = np.sqrt(mean_squared_error(y_valid, valid_pred))
-        valid_r2 = r2_score(y_valid, valid_pred)
-        
-        logging.info(f"Random Forest - Train RMSE: {train_rmse:.4f}, Valid RMSE: {valid_rmse:.4f}, Valid R²: {valid_r2:.4f}")
-        
-        self.models['random_forest'] = model
         return valid_pred
     
     def fit(self, X_train, y_train, X_valid, y_valid, feature_names, cat_indices=None):
@@ -283,7 +247,7 @@ class EnsembleForecaster:
         
         self.feature_names = feature_names
         
-        # Store validation predictions from each model
+        # Store validation predictions
         predictions = {}
         
         # Train each model
@@ -291,65 +255,50 @@ class EnsembleForecaster:
         predictions['lightgbm'] = self.train_lightgbm(X_train, y_train, X_valid, y_valid)
         predictions['catboost'] = self.train_catboost(X_train, y_train, X_valid, y_valid, cat_indices or [])
         predictions['ridge'] = self.train_ridge(X_train, y_train, X_valid, y_valid)
-        # predictions['random_forest'] = self.train_random_forest(X_train, y_train, X_valid, y_valid)
         
-        return predictions, y_valid
+        # Cache predictions
+        self.predictions_cache = predictions
+        
+        return predictions
     
     def optimize_weights(self, predictions, y_true):
-        """
-        Find optimal weights for ensemble using validation set
-        """
+        """Find optimal ensemble weights"""
         logging.info("\n" + "="*60)
         logging.info("Optimizing Ensemble Weights...")
         logging.info("="*60)
         
-        # Stack predictions into matrix
+        # Stack predictions
         pred_matrix = np.column_stack([predictions[name] for name in predictions.keys()])
         n_models = pred_matrix.shape[1]
         
         # Objective: minimize RMSE
         def objective(weights):
-            weights = weights / weights.sum()  # Normalize to sum to 1
+            weights = weights / weights.sum()
             ensemble_pred = pred_matrix @ weights
             return np.sqrt(mean_squared_error(y_true, ensemble_pred))
-        
-        # Initial weights (equal)
-        initial_weights = np.ones(n_models) / n_models
-        
-        # Bounds: weights between 0 and 1
-        bounds = [(0, 1)] * n_models
-        
-        # Constraint: weights sum to 1
-        constraints = {'type': 'eq', 'fun': lambda w: w.sum() - 1}
         
         # Optimize
         result = minimize(
             objective,
-            x0=initial_weights,
+            x0=np.ones(n_models) / n_models,
             method='SLSQP',
-            bounds=bounds,
-            constraints=constraints
+            bounds=[(0, 1)] * n_models,
+            constraints={'type': 'eq', 'fun': lambda w: w.sum() - 1}
         )
         
         optimal_weights = result.x
         
-        # Print weights
-        logging.info("\nOptimal Weights:")
-        for i, (name, weight) in enumerate(zip(predictions.keys(), optimal_weights)):
-            logging.info(f"  {name}: {weight:.4f}")
-        
+        # Store weights
         self.weights = dict(zip(predictions.keys(), optimal_weights))
+        
+        logging.info("\nOptimal Weights:")
+        for name, weight in self.weights.items():
+            logging.info(f"  {name}: {weight:.4f}")
         
         return optimal_weights
     
     def predict(self, X, method='weighted'):
-        """
-        Make predictions using ensemble
-        
-        Args:
-            X: Features
-            method: 'simple' (average), 'weighted' (optimized weights), 'median'
-        """
+        """Make predictions"""
         
         predictions = {}
         
@@ -367,32 +316,23 @@ class EnsembleForecaster:
         if 'ridge' in self.models:
             predictions['ridge'] = self.models['ridge'].predict(X)
         
-        if 'random_forest' in self.models:
-            predictions['random_forest'] = self.models['random_forest'].predict(X)
-        
         # Combine predictions
         pred_matrix = np.column_stack([predictions[name] for name in predictions.keys()])
         
         if method == 'simple':
-            # Simple average
             return pred_matrix.mean(axis=1)
-        
         elif method == 'weighted':
-            # Weighted average
             if self.weights is None:
                 raise ValueError("Weights not optimized. Run optimize_weights first.")
             weights = np.array([self.weights[name] for name in predictions.keys()])
             return pred_matrix @ weights
-        
         elif method == 'median':
-            # Median (robust to outliers)
             return np.median(pred_matrix, axis=1)
-        
         else:
             raise ValueError(f"Unknown method: {method}")
     
     def save(self, filepath):
-        """Save ensemble to disk"""
+        """Save ensemble"""
         joblib.dump({
             'models': self.models,
             'weights': self.weights,
@@ -401,7 +341,7 @@ class EnsembleForecaster:
         logging.info(f"✓ Ensemble saved to {filepath}")
     
     def load(self, filepath):
-        """Load ensemble from disk"""
+        """Load ensemble"""
         data = joblib.load(filepath)
         self.models = data['models']
         self.weights = data['weights']
@@ -409,129 +349,268 @@ class EnsembleForecaster:
         logging.info(f"✓ Ensemble loaded from {filepath}")
 
 # =============================================================================
-# STEP 3: Train Ensemble
+# STEP 3: Complete Training Pipeline (Pure Polars)
 # =============================================================================
 
-# Initialize ensemble
-ensemble = EnsembleForecaster()
-
-# Train all models
-logging.info("\n" + "="*80)
-logging.info("TRAINING ENSEMBLE")
-logging.info("="*80)
-
-predictions, y_valid = ensemble.fit(
-    X_train, y_train,
-    X_valid, y_valid,
-    feature_names=feature_names,
-    cat_indices=cat_indices
-)
-
-# =============================================================================
-# STEP 4: Optimize Weights
-# =============================================================================
-
-optimal_weights = ensemble.optimize_weights(predictions, y_valid)
-
-# =============================================================================
-# STEP 5: Evaluate Ensemble
-# =============================================================================
-
-logging.info("\n" + "="*60)
-logging.info("ENSEMBLE EVALUATION")
-logging.info("="*60)
-
-# Individual model performance
-logging.info("\nIndividual Models:")
-for name, pred in predictions.items():
-    rmse = np.sqrt(mean_squared_error(y_valid, pred))
-    mae = mean_absolute_error(y_valid, pred)
-    r2 = r2_score(y_valid, pred)
-    
-    mask = y_valid > 0
-    mape = np.mean(np.abs((y_valid[mask] - pred[mask]) / y_valid[mask])) * 100
-    
-    logging.info(f"{name:15s} - RMSE: {rmse:6.2f}, MAE: {mae:6.2f}, R²: {r2:6.4f}, MAPE: {mape:5.1f}%")
-
-# Simple average ensemble
-simple_pred = ensemble.predict(X_valid, method='simple')
-simple_rmse = np.sqrt(mean_squared_error(y_valid, simple_pred))
-simple_mae = mean_absolute_error(y_valid, simple_pred)
-simple_r2 = r2_score(y_valid, simple_pred)
-
-mask = y_valid > 0
-simple_mape = np.mean(np.abs((y_valid[mask] - simple_pred[mask]) / y_valid[mask])) * 100
-
-logging.info(f"\n{'Simple Average':15s} - RMSE: {simple_rmse:6.2f}, MAE: {simple_mae:6.2f}, R²: {simple_r2:6.4f}, MAPE: {simple_mape:5.1f}%")
-
-# Weighted ensemble
-weighted_pred = ensemble.predict(X_valid, method='weighted')
-weighted_rmse = np.sqrt(mean_squared_error(y_valid, weighted_pred))
-weighted_mae = mean_absolute_error(y_valid, weighted_pred)
-weighted_r2 = r2_score(y_valid, weighted_pred)
-
-mask = y_valid > 0
-weighted_mape = np.mean(np.abs((y_valid[mask] - weighted_pred[mask]) / y_valid[mask])) * 100
-
-logging.info(f"{'Weighted Avg':15s} - RMSE: {weighted_rmse:6.2f}, MAE: {weighted_mae:6.2f}, R²: {weighted_r2:6.4f}, MAPE: {weighted_mape:5.1f}%")
-
-# Median ensemble
-median_pred = ensemble.predict(X_valid, method='median')
-median_rmse = np.sqrt(mean_squared_error(y_valid, median_pred))
-median_mae = mean_absolute_error(y_valid, median_pred)
-median_r2 = r2_score(y_valid, median_pred)
-
-mask = y_valid > 0
-median_mape = np.mean(np.abs((y_valid[mask] - median_pred[mask]) / y_valid[mask])) * 100
-
-logging.info(f"{'Median':15s} - RMSE: {median_rmse:6.2f}, MAE: {median_mae:6.2f}, R²: {median_r2:6.4f}, MAPE: {median_mape:5.1f}%")
-
-# =============================================================================
-# STEP 6: Save Ensemble
-# =============================================================================
-
-ensemble.save("models/ensemble_demand_forecast.pkl")
-
-# =============================================================================
-# STEP 7: Prediction Analysis
-# =============================================================================
-
-logging.info("\n" + "="*60)
-logging.info("PREDICTION ANALYSIS")
-logging.info("="*60)
-
-# Compare predictions
-results_df = pd.DataFrame({
-    'actual': y_valid,
-    'xgboost': predictions['xgboost'],
-    'lightgbm': predictions['lightgbm'],
-    'catboost': predictions['catboost'],
-    'ridge': predictions['ridge'],
-    'ensemble_weighted': weighted_pred,
-    'ensemble_simple': simple_pred
-})
-
-# Sample
-logging.info("\nSample Predictions:")
-print(results_df.head(20))
-
-# Save results
-results_df.to_csv("models/ensemble_predictions.csv", index=False)
-logging.info("\n✓ Predictions saved to models/ensemble_predictions.csv")
-
-# =============================================================================
-# STEP 8: Usage for New Data
-# =============================================================================
-
-def predict_new_data(ensemble, new_data_snowpark):
+def train_ensemble_pipeline(train_df_polars, valid_df_polars, target_col='TOTAL_QUANTITY'):
     """
-    Make predictions on new data
+    Complete ensemble training pipeline using Polars DataFrames
     """
-    X_new, _, _, _, _ = prepare_ensemble_data(new_data_snowpark)
     
+    logging.info("\n" + "="*80)
+    logging.info("ENSEMBLE TRAINING PIPELINE (POLARS)")
+    logging.info("="*80)
+    
+    # Prepare data
+    logging.info("\nPreparing training data...")
+    X_train, y_train, feature_names, cat_indices, _ = prepare_ensemble_data_polars(
+        train_df_polars, target_col
+    )
+    
+    logging.info("Preparing validation data...")
+    X_valid, y_valid, _, _, _ = prepare_ensemble_data_polars(
+        valid_df_polars, target_col
+    )
+    
+    # Initialize ensemble
+    ensemble = PolarsEnsembleForecaster()
+    
+    # Train all models
+    logging.info("\n" + "="*80)
+    logging.info("TRAINING MODELS")
+    logging.info("="*80)
+    
+    predictions = ensemble.fit(
+        X_train, y_train,
+        X_valid, y_valid,
+        feature_names=feature_names,
+        cat_indices=cat_indices
+    )
+    
+    # Optimize weights
+    optimal_weights = ensemble.optimize_weights(predictions, y_valid)
+    
+    # Evaluate
+    evaluate_ensemble_polars(ensemble, predictions, y_valid)
+    
+    return ensemble, predictions, y_valid
+
+# =============================================================================
+# STEP 4: Evaluation (Using Polars for Results)
+# =============================================================================
+
+def evaluate_ensemble_polars(ensemble, predictions, y_valid):
+    """
+    Evaluate ensemble performance and store results in Polars DataFrame
+    """
+    
+    logging.info("\n" + "="*60)
+    logging.info("ENSEMBLE EVALUATION")
+    logging.info("="*60)
+    
+    results = []
+    
+    # Individual models
+    logging.info("\nIndividual Models:")
+    for name, pred in predictions.items():
+        rmse = np.sqrt(mean_squared_error(y_valid, pred))
+        mae = mean_absolute_error(y_valid, pred)
+        r2 = r2_score(y_valid, pred)
+        
+        mask = y_valid > 0
+        mape = np.mean(np.abs((y_valid[mask] - pred[mask]) / y_valid[mask])) * 100 if mask.sum() > 0 else np.nan
+        
+        logging.info(f"{name:15s} - RMSE: {rmse:6.2f}, MAE: {mae:6.2f}, R²: {r2:6.4f}, MAPE: {mape:5.1f}%")
+        
+        results.append({
+            'model': name,
+            'rmse': rmse,
+            'mae': mae,
+            'r2': r2,
+            'mape': mape
+        })
+    
+    # Ensemble methods
+    for method_name, method in [('Simple Average', 'simple'), ('Weighted', 'weighted'), ('Median', 'median')]:
+        X_valid_dummy = np.column_stack([predictions[name] for name in predictions.keys()])
+        
+        if method == 'weighted' and ensemble.weights is None:
+            continue
+            
+        # For evaluation, we already have predictions, just combine them
+        pred_matrix = np.column_stack([predictions[name] for name in predictions.keys()])
+        
+        if method == 'simple':
+            ens_pred = pred_matrix.mean(axis=1)
+        elif method == 'weighted':
+            weights = np.array([ensemble.weights[name] for name in predictions.keys()])
+            ens_pred = pred_matrix @ weights
+        elif method == 'median':
+            ens_pred = np.median(pred_matrix, axis=1)
+        
+        rmse = np.sqrt(mean_squared_error(y_valid, ens_pred))
+        mae = mean_absolute_error(y_valid, ens_pred)
+        r2 = r2_score(y_valid, ens_pred)
+        
+        mask = y_valid > 0
+        mape = np.mean(np.abs((y_valid[mask] - ens_pred[mask]) / y_valid[mask])) * 100 if mask.sum() > 0 else np.nan
+        
+        logging.info(f"\n{method_name:15s} - RMSE: {rmse:6.2f}, MAE: {mae:6.2f}, R²: {r2:6.4f}, MAPE: {mape:5.1f}%")
+        
+        results.append({
+            'model': f'ensemble_{method}',
+            'rmse': rmse,
+            'mae': mae,
+            'r2': r2,
+            'mape': mape
+        })
+    
+    # Convert results to Polars DataFrame
+    results_df = pl.DataFrame(results)
+    
+    # Save results
+    results_df.write_csv("models/ensemble_evaluation.csv")
+    logging.info("\n✓ Evaluation results saved to models/ensemble_evaluation.csv")
+    
+    return results_df
+
+# =============================================================================
+# STEP 5: Prediction Analysis (Pure Polars)
+# =============================================================================
+
+def analyze_predictions_polars(predictions, y_valid, valid_df_polars):
+    """
+    Analyze predictions and create comparison DataFrame using Polars
+    """
+    
+    logging.info("\n" + "="*60)
+    logging.info("PREDICTION ANALYSIS")
+    logging.info("="*60)
+    
+    # Create predictions DataFrame
+    pred_data = {
+        'actual': y_valid,
+        'xgboost': predictions['xgboost'],
+        'lightgbm': predictions['lightgbm'],
+        'catboost': predictions['catboost'],
+        'ridge': predictions['ridge']
+    }
+    
+    # Weighted ensemble
+    pred_matrix = np.column_stack([predictions[name] for name in predictions.keys()])
+    # Assume equal weights if not optimized
+    pred_data['ensemble_simple'] = pred_matrix.mean(axis=1)
+    
+    # Create Polars DataFrame
+    results_df = pl.DataFrame(pred_data)
+    
+    # Add identifiers from original data
+    if valid_df_polars.height == results_df.height:
+        results_df = results_df.with_columns([
+            valid_df_polars['CUSTOMER_EXTERNAL_CODE'],
+            valid_df_polars['SKU_ERP_CODE'],
+            valid_df_polars['WEEK_START_DATE']
+        ])
+    
+    # Calculate errors
+    results_df = results_df.with_columns([
+        (pl.col('actual') - pl.col('ensemble_simple')).alias('error'),
+        ((pl.col('actual') - pl.col('ensemble_simple')).abs()).alias('abs_error'),
+        ((pl.col('actual') - pl.col('ensemble_simple')).abs() / (pl.col('actual') + 0.01) * 100).alias('pct_error')
+    ])
+    
+    # Show sample
+    logging.info("\nSample Predictions:")
+    print(results_df.head(20))
+    
+    # Summary statistics
+    logging.info("\nPrediction Statistics:")
+    print(results_df.select([
+        'actual', 'xgboost', 'lightgbm', 'catboost', 'ridge', 'ensemble_simple'
+    ]).describe())
+    
+    # Save
+    results_df.write_csv("models/ensemble_predictions_polars.csv")
+    logging.info("\n✓ Predictions saved to models/ensemble_predictions_polars.csv")
+    
+    return results_df
+
+# =============================================================================
+# STEP 6: Usage Example (Complete Pipeline)
+# =============================================================================
+
+def main_polars_ensemble():
+    """
+    Complete example: Train ensemble using Snowpark/Polars data
+    """
+    
+    # Load data from Snowpark (already Polars-compatible)
+    # from snowflake.snowpark import Session
+    # session = Session.builder.configs({...}).create()
+    # train_df_snowpark = session.table("TRAIN_TABLE")
+    # valid_df_snowpark = session.table("VALID_TABLE")
+    
+    # Convert Snowpark to Polars (or load directly)
+    # train_df = train_df_snowpark.to_pandas()  # Then pl.from_pandas()
+    # OR load parquet directly:
+    
+    train_df = pl.read_parquet("train.parquet")
+    valid_df = pl.read_parquet("valid.parquet")
+    
+    logging.info(f"Train shape: {train_df.shape}")
+    logging.info(f"Valid shape: {valid_df.shape}")
+    
+    # Train ensemble
+    ensemble, predictions, y_valid = train_ensemble_pipeline(
+        train_df,
+        valid_df,
+        target_col='TOTAL_QUANTITY'
+    )
+    
+    # Analyze predictions
+    results_df = analyze_predictions_polars(predictions, y_valid, valid_df)
+    
+    # Save ensemble
+    ensemble.save("models/polars_ensemble.pkl")
+    
+    logging.info("\n" + "="*80)
+    logging.info("✓ ENSEMBLE TRAINING COMPLETE")
+    logging.info("="*80)
+    
+    return ensemble, results_df
+
+# =============================================================================
+# STEP 7: Prediction on New Data (Pure Polars)
+# =============================================================================
+
+def predict_new_data_polars(ensemble, new_df_polars, target_col='TOTAL_QUANTITY'):
+    """
+    Make predictions on new Polars DataFrame
+    """
+    
+    logging.info("\nMaking predictions on new data...")
+    
+    # Prepare data
+    X_new, _, _, _, _ = prepare_ensemble_data_polars(new_df_polars, target_col)
+    
+    # Predict
     predictions = ensemble.predict(X_new, method='weighted')
     
-    return predictions
+    # Add predictions to DataFrame
+    result_df = new_df_polars.with_columns(
+        pl.Series('prediction', predictions)
+    )
+    
+    logging.info(f"✓ Predictions completed: {len(predictions)} rows")
+    
+    return result_df
 
-# Example usage:
-# predictions_future = predict_new_data(ensemble, future_data_df)
+# =============================================================================
+# Run Pipeline
+# =============================================================================
+
+if __name__ == "__main__":
+    # Example: Run complete pipeline
+    # ensemble, results = main_polars_ensemble()
+    
+    pass
