@@ -1,74 +1,537 @@
 # =============================================================================
-# COMPLETE HYPERPARAMETER TUNING PIPELINE
+# COMPLETE ENSEMBLE MODELING FOR DEMAND FORECASTING
+# Combines XGBoost + LightGBM + CatBoost + Ridge for Maximum Accuracy
 # =============================================================================
 
-import optuna
-import xgboost as xgb
 import numpy as np
+import pandas as pd
+import xgboost as xgb
+import lightgbm as lgb
+from catboost import CatBoostRegressor
+from sklearn.linear_model import Ridge, Lasso
+from sklearn.ensemble import RandomForestRegressor
 from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
+from scipy.optimize import minimize
+import joblib
 import logging
 
-# Setup logging
-optuna.logging.set_verbosity(optuna.logging.INFO)
+logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
 
-# Prepare data (assumes you have X_train, y_train, X_valid, y_valid ready)
-dtrain = xgb.DMatrix(X_train, label=y_train)
-dvalid = xgb.DMatrix(X_valid, label=y_valid)
+# =============================================================================
+# STEP 1: Prepare Data
+# =============================================================================
 
-def objective(trial):
-    params = {
-        'objective': 'reg:squarederror',
-        'eval_metric': 'rmse',
-        'tree_method': 'hist',
-        'random_state': 42,
+def prepare_ensemble_data(df_snowpark):
+    """
+    Convert Snowpark DataFrame to format suitable for all models
+    """
+    
+    # Convert to pandas
+    df = df_snowpark.to_pandas()
+    
+    # Identify categorical columns
+    cat_features = ['CUSTOMER_EXTERNAL_CODE', 'SKU_ERP_CODE']
+    
+    # Encode categoricals for XGBoost/LightGBM/Ridge
+    df_encoded = df.copy()
+    for col in cat_features:
+        df_encoded[col] = pd.Categorical(df_encoded[col]).codes
+    
+    # Split features and target
+    feature_cols = [c for c in df.columns if c not in [
+        'TOTAL_QUANTITY', 'WEEK_START_DATE', 'WEEK_END_DATE',
+        'ORDER_IDS', 'ORDER_DATES', 'y', 'y_log1p'
+    ]]
+    
+    X = df_encoded[feature_cols].values
+    y = df['TOTAL_QUANTITY'].values
+    
+    # Keep categorical indices for CatBoost
+    cat_indices = [feature_cols.index(col) for col in cat_features if col in feature_cols]
+    
+    return X, y, feature_cols, cat_indices, df[cat_features]
+
+# Assuming you have train/valid data ready
+logging.info("Preparing data...")
+X_train, y_train, feature_names, cat_indices, cat_train = prepare_ensemble_data(train_df)
+X_valid, y_valid, _, _, cat_valid = prepare_ensemble_data(valid_df)
+
+logging.info(f"Train: {X_train.shape}, Valid: {X_valid.shape}")
+
+# =============================================================================
+# STEP 2: Train Individual Models
+# =============================================================================
+
+class EnsembleForecaster:
+    """
+    Ensemble of multiple models for demand forecasting
+    """
+    
+    def __init__(self):
+        self.models = {}
+        self.weights = None
+        self.feature_names = None
         
-        # Tunable parameters
-        'max_depth': trial.suggest_int('max_depth', 3, 6),
-        'min_child_weight': trial.suggest_int('min_child_weight', 5, 20),
-        'gamma': trial.suggest_float('gamma', 0, 5),
-        'learning_rate': trial.suggest_float('learning_rate', 0.01, 0.1, log=True),
-        'subsample': trial.suggest_float('subsample', 0.7, 0.95),
-        'colsample_bytree': trial.suggest_float('colsample_bytree', 0.7, 0.95),
-        'colsample_bylevel': trial.suggest_float('colsample_bylevel', 0.7, 0.95),
-        'reg_alpha': trial.suggest_float('reg_alpha', 0.1, 5.0, log=True),
-        'reg_lambda': trial.suggest_float('reg_lambda', 0.5, 10.0, log=True),
-    }
+    def train_xgboost(self, X_train, y_train, X_valid, y_valid):
+        """Train XGBoost model"""
+        logging.info("\n" + "="*60)
+        logging.info("Training XGBoost...")
+        logging.info("="*60)
+        
+        params = {
+            'objective': 'reg:squarederror',
+            'eval_metric': 'rmse',
+            'max_depth': 5,
+            'learning_rate': 0.03,
+            'subsample': 0.8,
+            'colsample_bytree': 0.8,
+            'min_child_weight': 10,
+            'reg_alpha': 1.0,
+            'reg_lambda': 2.0,
+            'tree_method': 'hist',
+            'random_state': 42
+        }
+        
+        dtrain = xgb.DMatrix(X_train, label=y_train, feature_names=self.feature_names)
+        dvalid = xgb.DMatrix(X_valid, label=y_valid, feature_names=self.feature_names)
+        
+        model = xgb.train(
+            params,
+            dtrain,
+            num_boost_round=600,
+            evals=[(dtrain, 'train'), (dvalid, 'valid')],
+            early_stopping_rounds=50,
+            verbose_eval=100
+        )
+        
+        # Predictions
+        train_pred = model.predict(dtrain)
+        valid_pred = model.predict(dvalid)
+        
+        # Metrics
+        train_rmse = np.sqrt(mean_squared_error(y_train, train_pred))
+        valid_rmse = np.sqrt(mean_squared_error(y_valid, valid_pred))
+        valid_r2 = r2_score(y_valid, valid_pred)
+        
+        logging.info(f"XGBoost - Train RMSE: {train_rmse:.4f}, Valid RMSE: {valid_rmse:.4f}, Valid R²: {valid_r2:.4f}")
+        
+        self.models['xgboost'] = model
+        return valid_pred
     
-    n_estimators = trial.suggest_int('n_estimators', 100, 800)
+    def train_lightgbm(self, X_train, y_train, X_valid, y_valid):
+        """Train LightGBM model"""
+        logging.info("\n" + "="*60)
+        logging.info("Training LightGBM...")
+        logging.info("="*60)
+        
+        params = {
+            'objective': 'regression',
+            'metric': 'rmse',
+            'max_depth': 6,
+            'learning_rate': 0.03,
+            'num_leaves': 31,
+            'feature_fraction': 0.8,
+            'bagging_fraction': 0.8,
+            'bagging_freq': 5,
+            'min_child_weight': 10,
+            'lambda_l1': 1.0,
+            'lambda_l2': 2.0,
+            'verbose': -1,
+            'random_state': 42
+        }
+        
+        lgb_train = lgb.Dataset(X_train, label=y_train, feature_name=self.feature_names)
+        lgb_valid = lgb.Dataset(X_valid, label=y_valid, reference=lgb_train)
+        
+        model = lgb.train(
+            params,
+            lgb_train,
+            num_boost_round=600,
+            valid_sets=[lgb_train, lgb_valid],
+            valid_names=['train', 'valid'],
+            callbacks=[lgb.early_stopping(50), lgb.log_evaluation(100)]
+        )
+        
+        # Predictions
+        train_pred = model.predict(X_train)
+        valid_pred = model.predict(X_valid)
+        
+        # Metrics
+        train_rmse = np.sqrt(mean_squared_error(y_train, train_pred))
+        valid_rmse = np.sqrt(mean_squared_error(y_valid, valid_pred))
+        valid_r2 = r2_score(y_valid, valid_pred)
+        
+        logging.info(f"LightGBM - Train RMSE: {train_rmse:.4f}, Valid RMSE: {valid_rmse:.4f}, Valid R²: {valid_r2:.4f}")
+        
+        self.models['lightgbm'] = model
+        return valid_pred
     
-    model = xgb.train(
-        params,
-        dtrain,
-        num_boost_round=n_estimators,
-        evals=[(dvalid, 'valid')],
-        early_stopping_rounds=50,
-        verbose_eval=False
-    )
+    def train_catboost(self, X_train, y_train, X_valid, y_valid, cat_indices):
+        """Train CatBoost model"""
+        logging.info("\n" + "="*60)
+        logging.info("Training CatBoost...")
+        logging.info("="*60)
+        
+        model = CatBoostRegressor(
+            iterations=600,
+            depth=5,
+            learning_rate=0.03,
+            l2_leaf_reg=3.0,
+            subsample=0.8,
+            rsm=0.8,  # colsample_bytree equivalent
+            cat_features=cat_indices,
+            loss_function='RMSE',
+            eval_metric='RMSE',
+            random_seed=42,
+            verbose=100,
+            early_stopping_rounds=50
+        )
+        
+        model.fit(
+            X_train, y_train,
+            eval_set=(X_valid, y_valid),
+            use_best_model=True
+        )
+        
+        # Predictions
+        train_pred = model.predict(X_train)
+        valid_pred = model.predict(X_valid)
+        
+        # Metrics
+        train_rmse = np.sqrt(mean_squared_error(y_train, train_pred))
+        valid_rmse = np.sqrt(mean_squared_error(y_valid, valid_pred))
+        valid_r2 = r2_score(y_valid, valid_pred)
+        
+        logging.info(f"CatBoost - Train RMSE: {train_rmse:.4f}, Valid RMSE: {valid_rmse:.4f}, Valid R²: {valid_r2:.4f}")
+        
+        self.models['catboost'] = model
+        return valid_pred
     
-    y_pred = model.predict(dvalid)
-    rmse = np.sqrt(mean_squared_error(y_valid, y_pred))
+    def train_ridge(self, X_train, y_train, X_valid, y_valid):
+        """Train Ridge regression (captures linear patterns)"""
+        logging.info("\n" + "="*60)
+        logging.info("Training Ridge Regression...")
+        logging.info("="*60)
+        
+        # Try multiple alpha values
+        alphas = [0.1, 1.0, 10.0, 50.0, 100.0]
+        best_score = float('inf')
+        best_alpha = None
+        
+        for alpha in alphas:
+            model = Ridge(alpha=alpha, random_state=42)
+            model.fit(X_train, y_train)
+            pred = model.predict(X_valid)
+            rmse = np.sqrt(mean_squared_error(y_valid, pred))
+            
+            if rmse < best_score:
+                best_score = rmse
+                best_alpha = alpha
+        
+        # Train with best alpha
+        model = Ridge(alpha=best_alpha, random_state=42)
+        model.fit(X_train, y_train)
+        
+        # Predictions
+        train_pred = model.predict(X_train)
+        valid_pred = model.predict(X_valid)
+        
+        # Metrics
+        train_rmse = np.sqrt(mean_squared_error(y_train, train_pred))
+        valid_rmse = np.sqrt(mean_squared_error(y_valid, valid_pred))
+        valid_r2 = r2_score(y_valid, valid_pred)
+        
+        logging.info(f"Ridge (α={best_alpha}) - Train RMSE: {train_rmse:.4f}, Valid RMSE: {valid_rmse:.4f}, Valid R²: {valid_r2:.4f}")
+        
+        self.models['ridge'] = model
+        return valid_pred
     
-    trial.set_user_attr('mae', mean_absolute_error(y_valid, y_pred))
-    trial.set_user_attr('r2', r2_score(y_valid, y_pred))
+    def train_random_forest(self, X_train, y_train, X_valid, y_valid):
+        """Train Random Forest (optional 5th model)"""
+        logging.info("\n" + "="*60)
+        logging.info("Training Random Forest...")
+        logging.info("="*60)
+        
+        model = RandomForestRegressor(
+            n_estimators=200,
+            max_depth=10,
+            min_samples_split=20,
+            min_samples_leaf=10,
+            max_features='sqrt',
+            n_jobs=-1,
+            random_state=42
+        )
+        
+        model.fit(X_train, y_train)
+        
+        # Predictions
+        train_pred = model.predict(X_train)
+        valid_pred = model.predict(X_valid)
+        
+        # Metrics
+        train_rmse = np.sqrt(mean_squared_error(y_train, train_pred))
+        valid_rmse = np.sqrt(mean_squared_error(y_valid, valid_pred))
+        valid_r2 = r2_score(y_valid, valid_pred)
+        
+        logging.info(f"Random Forest - Train RMSE: {train_rmse:.4f}, Valid RMSE: {valid_rmse:.4f}, Valid R²: {valid_r2:.4f}")
+        
+        self.models['random_forest'] = model
+        return valid_pred
     
-    return rmse
+    def fit(self, X_train, y_train, X_valid, y_valid, feature_names, cat_indices=None):
+        """Train all models"""
+        
+        self.feature_names = feature_names
+        
+        # Store validation predictions from each model
+        predictions = {}
+        
+        # Train each model
+        predictions['xgboost'] = self.train_xgboost(X_train, y_train, X_valid, y_valid)
+        predictions['lightgbm'] = self.train_lightgbm(X_train, y_train, X_valid, y_valid)
+        predictions['catboost'] = self.train_catboost(X_train, y_train, X_valid, y_valid, cat_indices or [])
+        predictions['ridge'] = self.train_ridge(X_train, y_train, X_valid, y_valid)
+        # predictions['random_forest'] = self.train_random_forest(X_train, y_train, X_valid, y_valid)
+        
+        return predictions, y_valid
+    
+    def optimize_weights(self, predictions, y_true):
+        """
+        Find optimal weights for ensemble using validation set
+        """
+        logging.info("\n" + "="*60)
+        logging.info("Optimizing Ensemble Weights...")
+        logging.info("="*60)
+        
+        # Stack predictions into matrix
+        pred_matrix = np.column_stack([predictions[name] for name in predictions.keys()])
+        n_models = pred_matrix.shape[1]
+        
+        # Objective: minimize RMSE
+        def objective(weights):
+            weights = weights / weights.sum()  # Normalize to sum to 1
+            ensemble_pred = pred_matrix @ weights
+            return np.sqrt(mean_squared_error(y_true, ensemble_pred))
+        
+        # Initial weights (equal)
+        initial_weights = np.ones(n_models) / n_models
+        
+        # Bounds: weights between 0 and 1
+        bounds = [(0, 1)] * n_models
+        
+        # Constraint: weights sum to 1
+        constraints = {'type': 'eq', 'fun': lambda w: w.sum() - 1}
+        
+        # Optimize
+        result = minimize(
+            objective,
+            x0=initial_weights,
+            method='SLSQP',
+            bounds=bounds,
+            constraints=constraints
+        )
+        
+        optimal_weights = result.x
+        
+        # Print weights
+        logging.info("\nOptimal Weights:")
+        for i, (name, weight) in enumerate(zip(predictions.keys(), optimal_weights)):
+            logging.info(f"  {name}: {weight:.4f}")
+        
+        self.weights = dict(zip(predictions.keys(), optimal_weights))
+        
+        return optimal_weights
+    
+    def predict(self, X, method='weighted'):
+        """
+        Make predictions using ensemble
+        
+        Args:
+            X: Features
+            method: 'simple' (average), 'weighted' (optimized weights), 'median'
+        """
+        
+        predictions = {}
+        
+        # Get predictions from each model
+        if 'xgboost' in self.models:
+            dmatrix = xgb.DMatrix(X, feature_names=self.feature_names)
+            predictions['xgboost'] = self.models['xgboost'].predict(dmatrix)
+        
+        if 'lightgbm' in self.models:
+            predictions['lightgbm'] = self.models['lightgbm'].predict(X)
+        
+        if 'catboost' in self.models:
+            predictions['catboost'] = self.models['catboost'].predict(X)
+        
+        if 'ridge' in self.models:
+            predictions['ridge'] = self.models['ridge'].predict(X)
+        
+        if 'random_forest' in self.models:
+            predictions['random_forest'] = self.models['random_forest'].predict(X)
+        
+        # Combine predictions
+        pred_matrix = np.column_stack([predictions[name] for name in predictions.keys()])
+        
+        if method == 'simple':
+            # Simple average
+            return pred_matrix.mean(axis=1)
+        
+        elif method == 'weighted':
+            # Weighted average
+            if self.weights is None:
+                raise ValueError("Weights not optimized. Run optimize_weights first.")
+            weights = np.array([self.weights[name] for name in predictions.keys()])
+            return pred_matrix @ weights
+        
+        elif method == 'median':
+            # Median (robust to outliers)
+            return np.median(pred_matrix, axis=1)
+        
+        else:
+            raise ValueError(f"Unknown method: {method}")
+    
+    def save(self, filepath):
+        """Save ensemble to disk"""
+        joblib.dump({
+            'models': self.models,
+            'weights': self.weights,
+            'feature_names': self.feature_names
+        }, filepath)
+        logging.info(f"✓ Ensemble saved to {filepath}")
+    
+    def load(self, filepath):
+        """Load ensemble from disk"""
+        data = joblib.load(filepath)
+        self.models = data['models']
+        self.weights = data['weights']
+        self.feature_names = data['feature_names']
+        logging.info(f"✓ Ensemble loaded from {filepath}")
 
-# Run optimization
-study = optuna.create_study(direction='minimize')
-study.optimize(objective, n_trials=100, show_progress_bar=True)
+# =============================================================================
+# STEP 3: Train Ensemble
+# =============================================================================
 
-# Print results
-print("\n" + "="*60)
-print("OPTIMIZATION RESULTS")
-print("="*60)
-print(f"\nBest RMSE: {study.best_value:.4f}")
-print(f"Best MAE: {study.best_trial.user_attrs['mae']:.4f}")
-print(f"Best R²: {study.best_trial.user_attrs['r2']:.4f}")
-print("\nBest Parameters:")
-for k, v in study.best_params.items():
-    print(f"  {k}: {v}")
+# Initialize ensemble
+ensemble = EnsembleForecaster()
 
-# Save study
-import joblib
-joblib.dump(study, 'optuna_study.pkl')
-print("\n✓ Study saved to optuna_study.pkl")
+# Train all models
+logging.info("\n" + "="*80)
+logging.info("TRAINING ENSEMBLE")
+logging.info("="*80)
+
+predictions, y_valid = ensemble.fit(
+    X_train, y_train,
+    X_valid, y_valid,
+    feature_names=feature_names,
+    cat_indices=cat_indices
+)
+
+# =============================================================================
+# STEP 4: Optimize Weights
+# =============================================================================
+
+optimal_weights = ensemble.optimize_weights(predictions, y_valid)
+
+# =============================================================================
+# STEP 5: Evaluate Ensemble
+# =============================================================================
+
+logging.info("\n" + "="*60)
+logging.info("ENSEMBLE EVALUATION")
+logging.info("="*60)
+
+# Individual model performance
+logging.info("\nIndividual Models:")
+for name, pred in predictions.items():
+    rmse = np.sqrt(mean_squared_error(y_valid, pred))
+    mae = mean_absolute_error(y_valid, pred)
+    r2 = r2_score(y_valid, pred)
+    
+    mask = y_valid > 0
+    mape = np.mean(np.abs((y_valid[mask] - pred[mask]) / y_valid[mask])) * 100
+    
+    logging.info(f"{name:15s} - RMSE: {rmse:6.2f}, MAE: {mae:6.2f}, R²: {r2:6.4f}, MAPE: {mape:5.1f}%")
+
+# Simple average ensemble
+simple_pred = ensemble.predict(X_valid, method='simple')
+simple_rmse = np.sqrt(mean_squared_error(y_valid, simple_pred))
+simple_mae = mean_absolute_error(y_valid, simple_pred)
+simple_r2 = r2_score(y_valid, simple_pred)
+
+mask = y_valid > 0
+simple_mape = np.mean(np.abs((y_valid[mask] - simple_pred[mask]) / y_valid[mask])) * 100
+
+logging.info(f"\n{'Simple Average':15s} - RMSE: {simple_rmse:6.2f}, MAE: {simple_mae:6.2f}, R²: {simple_r2:6.4f}, MAPE: {simple_mape:5.1f}%")
+
+# Weighted ensemble
+weighted_pred = ensemble.predict(X_valid, method='weighted')
+weighted_rmse = np.sqrt(mean_squared_error(y_valid, weighted_pred))
+weighted_mae = mean_absolute_error(y_valid, weighted_pred)
+weighted_r2 = r2_score(y_valid, weighted_pred)
+
+mask = y_valid > 0
+weighted_mape = np.mean(np.abs((y_valid[mask] - weighted_pred[mask]) / y_valid[mask])) * 100
+
+logging.info(f"{'Weighted Avg':15s} - RMSE: {weighted_rmse:6.2f}, MAE: {weighted_mae:6.2f}, R²: {weighted_r2:6.4f}, MAPE: {weighted_mape:5.1f}%")
+
+# Median ensemble
+median_pred = ensemble.predict(X_valid, method='median')
+median_rmse = np.sqrt(mean_squared_error(y_valid, median_pred))
+median_mae = mean_absolute_error(y_valid, median_pred)
+median_r2 = r2_score(y_valid, median_pred)
+
+mask = y_valid > 0
+median_mape = np.mean(np.abs((y_valid[mask] - median_pred[mask]) / y_valid[mask])) * 100
+
+logging.info(f"{'Median':15s} - RMSE: {median_rmse:6.2f}, MAE: {median_mae:6.2f}, R²: {median_r2:6.4f}, MAPE: {median_mape:5.1f}%")
+
+# =============================================================================
+# STEP 6: Save Ensemble
+# =============================================================================
+
+ensemble.save("models/ensemble_demand_forecast.pkl")
+
+# =============================================================================
+# STEP 7: Prediction Analysis
+# =============================================================================
+
+logging.info("\n" + "="*60)
+logging.info("PREDICTION ANALYSIS")
+logging.info("="*60)
+
+# Compare predictions
+results_df = pd.DataFrame({
+    'actual': y_valid,
+    'xgboost': predictions['xgboost'],
+    'lightgbm': predictions['lightgbm'],
+    'catboost': predictions['catboost'],
+    'ridge': predictions['ridge'],
+    'ensemble_weighted': weighted_pred,
+    'ensemble_simple': simple_pred
+})
+
+# Sample
+logging.info("\nSample Predictions:")
+print(results_df.head(20))
+
+# Save results
+results_df.to_csv("models/ensemble_predictions.csv", index=False)
+logging.info("\n✓ Predictions saved to models/ensemble_predictions.csv")
+
+# =============================================================================
+# STEP 8: Usage for New Data
+# =============================================================================
+
+def predict_new_data(ensemble, new_data_snowpark):
+    """
+    Make predictions on new data
+    """
+    X_new, _, _, _, _ = prepare_ensemble_data(new_data_snowpark)
+    
+    predictions = ensemble.predict(X_new, method='weighted')
+    
+    return predictions
+
+# Example usage:
+# predictions_future = predict_new_data(ensemble, future_data_df)
