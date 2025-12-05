@@ -1,0 +1,31 @@
+import seaborn as sns
+import matplotlib.pyplot as plt
+import pandas as pd
+
+# Data
+data = pd.DataFrame({
+    "Model": ["Before Model", "Warranty Forecasting Model"],
+    "Accuracy": [70, 90]
+})
+
+# Color palette
+colors = ["#6da9e9", "#3d7ad6"]  # Blue shades
+
+# Plot
+plt.figure(figsize=(7,6))
+sns.barplot(data=data, x="Model", y="Accuracy", palette=colors)
+
+# Add Data Labels
+for index, row in data.iterrows():
+    plt.text(index, row.Accuracy + 1, f"{row.Accuracy}%", 
+             color='black', ha="center", fontsize=13, fontweight='bold')
+
+# Title and Labels
+plt.ylim(0, 100)
+plt.title("Warranty Forecast Accuracy Improvement", fontsize=16, fontweight='bold')
+plt.ylabel("Accuracy (%)")
+plt.xlabel("")
+
+# Clean style
+sns.despine(bottom=True)
+plt.show()
