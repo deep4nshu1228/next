@@ -1,31 +1,40 @@
-import seaborn as sns
 import matplotlib.pyplot as plt
-import pandas as pd
+import seaborn as sns
+import numpy as np
 
 # Data
-data = pd.DataFrame({
-    "Model": ["Before Model", "Warranty Forecasting Model"],
-    "Accuracy": [70, 90]
-})
-
-# Color palette
-colors = ["#6da9e9", "#3d7ad6"]  # Blue shades
+models = ["Before Model", "After Warranty\nForecasting Model"]
+accuracy_before_min = 70
+accuracy_before_max = 75
+accuracy_after = 90
 
 # Plot
-plt.figure(figsize=(7,6))
-sns.barplot(data=data, x="Model", y="Accuracy", palette=colors)
+plt.figure(figsize=(8,6))
 
-# Add Data Labels
-for index, row in data.iterrows():
-    plt.text(index, row.Accuracy + 1, f"{row.Accuracy}%", 
-             color='black', ha="center", fontsize=13, fontweight='bold')
+# Bar for BEFORE (range shaded/dotted)
+plt.bar("Before Model", accuracy_before_max, color="white",
+        edgecolor="black", hatch="...", linewidth=1.5)
+plt.bar("Before Model", accuracy_before_min, color="#cfe2ff",
+        edgecolor="black")
 
-# Title and Labels
-plt.ylim(0, 100)
-plt.title("Warranty Forecast Accuracy Improvement", fontsize=16, fontweight='bold')
-plt.ylabel("Accuracy (%)")
-plt.xlabel("")
+# Bar for AFTER (solid)
+plt.bar("After Warranty\nForecasting Model", accuracy_after,
+        color="#005ce6", edgecolor="black")
 
-# Clean style
+# Labels on top
+plt.text(0, accuracy_before_max + 1, "70–75%", ha="center", fontsize=12, fontweight="bold")
+plt.text(1, accuracy_after + 1, "90%", ha="center", fontsize=12, fontweight="bold")
+
+# Improvement Arrow
+plt.annotate("+15–20% Improvement",
+             xy=(0.5, 83), xytext=(0.5, 100),
+             ha="center", fontsize=13, fontweight='bold',
+             arrowprops=dict(arrowstyle="->", linewidth=2))
+
+# Styling
+plt.ylim(0, 105)
+plt.ylabel("Forecast Accuracy (%)", fontsize=12, fontweight='bold')
+plt.title("Warranty Forecast Accuracy: Before vs After Model", fontsize=15, fontweight='bold')
+
 sns.despine(bottom=True)
 plt.show()
