@@ -446,3 +446,90 @@ pairs = (
 )
 
 pairs.show(20)
+
+
+
+
+
+
+
+
+
+from snowflake.snowpark import functions as F
+
+# pair_stats should already exist, e.g.:
+# pair_stats = (
+#     pairs.group_by("DEALER_CITY", "SKU_A", "SKU_B")
+#     .agg(F.count_distinct("BASKET_ID").alias("PAIR_BASKETS"))
+# )
+
+# item_support:
+#   DEALER_CITY, SKU_ERP_CODE, ITEM_BASKETS
+# city_baskets:
+#   DEALER_CITY, TOTAL_BASKETS_CITY
+
+ia = item_support.alias("IA")
+ib = item_support.alias("IB")
+ps = pair_stats.alias("PS")
+cb = city_baskets.alias("CB")
+
+assoc = (
+    ps
+    # join item_support for A
+    .join(
+        ia,
+        on=(
+            (ps["DEALER_CITY"] == ia["DEALER_CITY"]) &
+            (ps["SKU_A"] == ia["SKU_ERP_CODE"])
+        ),
+        how="inner",
+    )
+    # join item_support for B
+    .join(
+        ib,
+        on=(
+            (ps["DEALER_CITY"] == ib["DEALER_CITY"]) &
+            (ps["SKU_B"] == ib["SKU_ERP_CODE"])
+        ),
+        how="inner",
+    )
+    # join total baskets per city (note: here we can safely use a string column name)
+    .join(
+        cb,
+        on="DEALER_CITY",
+        how="inner",
+    )
+    .select(
+        ps["DEALER_CITY"],
+        ps["SKU_A"],
+        ps["SKU_B"],
+        ps["PAIR_BASKETS"],
+        ia["ITEM_BASKETS"].alias("ITEM_A_BASKETS"),
+        ib["ITEM_BASKETS"].alias("ITEM_B_BASKETS"),
+        cb["TOTAL_BASKETS_CITY"],
+    )
+    .with_column(
+        "SUPPORT_PAIR",
+        F.col("PAIR_BASKETS") / F.col("TOTAL_BASKETS_CITY"),
+    )
+    .with_column(
+        "CONF_A_TO_B",
+        F.col("PAIR_BASKETS") / F.col("ITEM_A_BASKETS"),
+    )
+    .with_column(
+        "CONF_B_TO_A",
+        F.col("PAIR_BASKETS") / F.col("ITEM_B_BASKETS"),
+    )
+    .with_column(
+        "LIFT_A_TO_B",
+        F.col("CONF_A_TO_B") /
+        (F.col("ITEM_B_BASKETS") / F.col("TOTAL_BASKETS_CITY")),
+    )
+    .with_column(
+        "LIFT_B_TO_A",
+        F.col("CONF_B_TO_A") /
+        (F.col("ITEM_A_BASKETS") / F.col("TOTAL_BASKETS_CITY")),
+    )
+)
+
+assoc.show(50)
