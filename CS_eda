@@ -361,3 +361,50 @@ cust_recos = (
 
 print("Customer-level recommendations (first 100):")
 cust_recos.show(100)
+
+
+
+
+
+
+
+
+#=============
+# Debug
+#=============
+
+from snowflake.snowpark import functions as F
+
+item_support = (
+    basket_df.select(
+        F.col("DEALER_CITY").alias("DEALER_CITY"),
+        F.col("SKU_ERP_CODE").alias("SKU_ERP_CODE"),
+        F.concat_ws(
+            F.lit("|"),
+            F.col("DEALER_CITY"),
+            F.col("CUSTOMER_EXTERNAL_CODE"),
+            F.col("WEEK_START_DATE"),
+        ).alias("BASKET_ID"),
+    )
+    .group_by(F.col("DEALER_CITY"), F.col("SKU_ERP_CODE"))
+    .agg(
+        F.count_distinct(F.col("BASKET_ID")).alias("ITEM_BASKETS")
+    )
+)
+
+
+city_baskets = (
+    basket_df.select(
+        F.col("DEALER_CITY").alias("DEALER_CITY"),
+        F.concat_ws(
+            F.lit("|"),
+            F.col("DEALER_CITY"),
+            F.col("CUSTOMER_EXTERNAL_CODE"),
+            F.col("WEEK_START_DATE"),
+        ).alias("BASKET_ID"),
+    )
+    .group_by(F.col("DEALER_CITY"))
+    .agg(
+        F.count_distinct(F.col("BASKET_ID")).alias("TOTAL_BASKETS_CITY")
+    )
+)
