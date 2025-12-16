@@ -415,27 +415,34 @@ city_baskets = (
 
 from snowflake.snowpark import functions as F
 
+from snowflake.snowpark import functions as F
+
+b1 = multi_baskets.alias("B1")
+b2 = multi_baskets.alias("B2")
+
 pairs = (
-    multi_baskets.alias("b1")
-    .join(
-        multi_baskets.alias("b2"),
+    b1.join(
+        b2,
         on=(
-            (F.col("b1.DEALER_CITY") == F.col("b2.DEALER_CITY")) &
-            (F.col("b1.CUSTOMER_EXTERNAL_CODE") == F.col("b2.CUSTOMER_EXTERNAL_CODE")) &
-            (F.col("b1.WEEK_START_DATE") == F.col("b2.WEEK_START_DATE"))
+            (b1["DEALER_CITY"] == b2["DEALER_CITY"]) &
+            (b1["CUSTOMER_EXTERNAL_CODE"] == b2["CUSTOMER_EXTERNAL_CODE"]) &
+            (b1["WEEK_START_DATE"] == b2["WEEK_START_DATE"])
         ),
         how="inner",
     )
-    .filter(F.col("b1.SKU_ERP_CODE") < F.col("b2.SKU_ERP_CODE"))
+    # avoid self-pairs and duplicates
+    .filter(b1["SKU_ERP_CODE"] < b2["SKU_ERP_CODE"])
     .select(
-        F.col("b1.DEALER_CITY").alias("DEALER_CITY"),
-        F.col("b1.SKU_ERP_CODE").alias("SKU_A"),
-        F.col("b2.SKU_ERP_CODE").alias("SKU_B"),
+        b1["DEALER_CITY"].alias("DEALER_CITY"),
+        b1["SKU_ERP_CODE"].alias("SKU_A"),
+        b2["SKU_ERP_CODE"].alias("SKU_B"),
         F.concat_ws(
             F.lit("|"),
-            F.col("b1.DEALER_CITY"),
-            F.col("b1.CUSTOMER_EXTERNAL_CODE"),
-            F.col("b1.WEEK_START_DATE"),
+            b1["DEALER_CITY"],
+            b1["CUSTOMER_EXTERNAL_CODE"],
+            b1["WEEK_START_DATE"],
         ).alias("BASKET_ID"),
     )
 )
+
+pairs.show(20)
