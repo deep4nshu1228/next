@@ -457,20 +457,9 @@ pairs.show(20)
 
 from snowflake.snowpark import functions as F
 
-# pair_stats should already exist, e.g.:
-# pair_stats = (
-#     pairs.group_by("DEALER_CITY", "SKU_A", "SKU_B")
-#     .agg(F.count_distinct("BASKET_ID").alias("PAIR_BASKETS"))
-# )
-
-# item_support:
-#   DEALER_CITY, SKU_ERP_CODE, ITEM_BASKETS
-# city_baskets:
-#   DEALER_CITY, TOTAL_BASKETS_CITY
-
+ps = pair_stats.alias("PS")
 ia = item_support.alias("IA")
 ib = item_support.alias("IB")
-ps = pair_stats.alias("PS")
 cb = city_baskets.alias("CB")
 
 assoc = (
@@ -493,20 +482,20 @@ assoc = (
         ),
         how="inner",
     )
-    # join total baskets per city (note: here we can safely use a string column name)
+    # join total baskets per city – USE FULL CONDITION, DO NOT USE on="DEALER_CITY"
     .join(
         cb,
-        on="DEALER_CITY",
+        on=(ps["DEALER_CITY"] == cb["DEALER_CITY"]),
         how="inner",
     )
     .select(
-        ps["DEALER_CITY"],
-        ps["SKU_A"],
-        ps["SKU_B"],
-        ps["PAIR_BASKETS"],
+        ps["DEALER_CITY"].alias("DEALER_CITY"),
+        ps["SKU_A"].alias("SKU_A"),
+        ps["SKU_B"].alias("SKU_B"),
+        ps["PAIR_BASKETS"].alias("PAIR_BASKETS"),
         ia["ITEM_BASKETS"].alias("ITEM_A_BASKETS"),
         ib["ITEM_BASKETS"].alias("ITEM_B_BASKETS"),
-        cb["TOTAL_BASKETS_CITY"],
+        cb["TOTAL_BASKETS_CITY"].alias("TOTAL_BASKETS_CITY"),
     )
     .with_column(
         "SUPPORT_PAIR",
