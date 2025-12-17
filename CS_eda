@@ -452,19 +452,17 @@ pairs.show(20)
 
 
 
-
-
-
 from snowflake.snowpark import functions as F
 
+# Aliases for readability
 ps = pair_stats.alias("PS")
 ia = item_support.alias("IA")
 ib = item_support.alias("IB")
 cb = city_baskets.alias("CB")
 
-assoc = (
+# First build a CLEAN base DF with no alias-qualified columns
+assoc_base = (
     ps
-    # join item_support for A
     .join(
         ia,
         on=(
@@ -473,7 +471,6 @@ assoc = (
         ),
         how="inner",
     )
-    # join item_support for B
     .join(
         ib,
         on=(
@@ -482,7 +479,6 @@ assoc = (
         ),
         how="inner",
     )
-    # join total baskets per city – USE FULL CONDITION, DO NOT USE on="DEALER_CITY"
     .join(
         cb,
         on=(ps["DEALER_CITY"] == cb["DEALER_CITY"]),
@@ -497,6 +493,11 @@ assoc = (
         ib["ITEM_BASKETS"].alias("ITEM_B_BASKETS"),
         cb["TOTAL_BASKETS_CITY"].alias("TOTAL_BASKETS_CITY"),
     )
+)
+
+# Now compute metrics on the clean columns (no aliases in schema)
+assoc = (
+    assoc_base
     .with_column(
         "SUPPORT_PAIR",
         F.col("PAIR_BASKETS") / F.col("TOTAL_BASKETS_CITY"),
