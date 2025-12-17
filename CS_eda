@@ -643,3 +643,428 @@ assoc = (
 )
 
 assoc.show(50)
+
+
+
+
+
+
+
+
+
+
+
+
+#########
+V2
+########
+
+
+############################
+# 0. SETUP & BASE TABLE
+############################
+
+from snowflake.snowpark import Session, functions as F
+from datetime import date, timedelta
+
+CONNECTION_PARAMETERS = {
+    "account": "<ACCOUNT>",
+    "user": "<USER>",
+    "password": "<PASSWORD>",
+    "role": "<ROLE>",
+    "warehouse": "<WAREHOUSE>",
+    "database": "<DATABASE>",
+    "schema": "<SCHEMA>",
+}
+
+session = Session.builder.configs(CONNECTION_PARAMETERS).create()
+
+# --- Load table and NORMALIZE column names ONCE ---
+orders_raw = session.table("ORDER_FACT")
+
+# Make a simple mapping: strip spaces, uppercase
+rename_map = {c: c.upper().replace(" ", "_") for c in orders_raw.columns}
+
+orders = orders_raw.select(
+    *[F.col(old).alias(new) for old, new in rename_map.items()]
+)
+
+print("Schema after normalization:")
+orders.print_schema()
+
+############################
+# 1. BASIC EDA
+############################
+
+dim_cols = [
+    "CUSTOMER_EXTERNAL_CODE", "SKU_ERP_CODE",
+    "DEALER_CODE", "DEALER_CITY",
+    "ZONAL_OFFICE_NAME", "AREA_OFFICE_NAME"
+]
+
+num_cols = [
+    "NUM_ORDERS_WEEK", "NUM_ORDER_DAYS_WEEK",
+    "BASE_PRICE", "TOTAL_QUANTITY", "TOTAL_DLP_VALUE"
+]
+
+# Null counts
+null_exprs = (
+    [F.count(F.lit(1)).alias("ROW_COUNT")] +
+    [F.sum(F.col(c).is_null().cast("int")).alias(f"{c}_NULLS") for c in dim_cols + num_cols]
+)
+null_stats = orders.select(null_exprs).collect()
+print("Null stats:", null_stats)
+
+# Distincts
+distinct_stats = orders.select(
+    F.count_distinct("CUSTOMER_EXTERNAL_CODE").alias("N_CUSTOMERS"),
+    F.count_distinct("SKU_ERP_CODE").alias("N_SKUS"),
+    F.count_distinct("DEALER_CODE").alias("N_DEALERS"),
+    F.count_distinct("DEALER_CITY").alias("N_CITIES"),
+).collect()
+print("Distinct stats:", distinct_stats)
+
+# Numeric stats
+num_stat_exprs = []
+for c in num_cols:
+    num_stat_exprs.append(F.min(c).alias(f"{c}_MIN"))
+for c in num_cols:
+    num_stat_exprs.append(F.max(c).alias(f"{c}_MAX"))
+for c in num_cols:
+    num_stat_exprs.append(F.avg(c).alias(f"{c}_AVG"))
+
+num_stats = orders.select(num_stat_exprs).collect()
+print("Numeric stats:", num_stats)
+
+# Date / week sanity
+date_checks = orders.select(
+    F.min("WEEK_START_DATE").alias("MIN_WEEK_START"),
+    F.max("WEEK_END_DATE").alias("MAX_WEEK_END"),
+    F.count_distinct("WEEK_START_DATE").alias("N_WEEKS"),
+)
+print("Date checks:", date_checks.collect())
+
+sanity_checks = orders.select(
+    F.sum((F.col("NUM_ORDERS_WEEK") <= 0).cast("int")).alias("NONPOS_NUM_ORDERS"),
+    F.sum((F.col("TOTAL_QUANTITY") <= 0).cast("int")).alias("NONPOS_QTY"),
+    F.sum((F.col("TOTAL_DLP_VALUE") <= 0).cast("int")).alias("NONPOS_VALUE"),
+)
+print("Sanity checks:", sanity_checks.collect())
+
+############################
+# 2. CITY & CUSTOMER EDA
+############################
+
+city_agg = (
+    orders.group_by("DEALER_CITY")
+    .agg(
+        F.count_distinct("CUSTOMER_EXTERNAL_CODE").alias("N_CUSTOMERS"),
+        F.count_distinct("SKU_ERP_CODE").alias("N_SKUS"),
+        F.sum("TOTAL_QUANTITY").alias("QTY_CITY"),
+        F.sum("TOTAL_DLP_VALUE").alias("REV_CITY"),
+    )
+    .order_by(F.col("REV_CITY").desc())
+)
+print("City-level aggregation:")
+city_agg.show(50)
+
+cust_city_agg = (
+    orders.group_by("DEALER_CITY", "CUSTOMER_EXTERNAL_CODE")
+    .agg(
+        F.count_distinct("WEEK_START_DATE").alias("ACTIVE_WEEKS"),
+        F.sum("NUM_ORDERS_WEEK").alias("ORDERS_TOTAL"),
+        F.sum("TOTAL_QUANTITY").alias("QTY_TOTAL"),
+        F.sum("TOTAL_DLP_VALUE").alias("REV_TOTAL"),
+    )
+)
+print("Customer-city aggregation (top 50 by revenue):")
+cust_city_agg.order_by(F.col("REV_TOTAL").desc()).show(50)
+
+############################
+# 3. DEFINE BASKETS
+############################
+
+# Treat (DEALER_CITY, CUSTOMER_EXTERNAL_CODE, WEEK_START_DATE) as a basket
+basket_df = orders.select(
+    "DEALER_CITY",
+    "CUSTOMER_EXTERNAL_CODE",
+    "WEEK_START_DATE",
+    "SKU_ERP_CODE",
+    "TOTAL_QUANTITY",
+)
+
+basket_sizes = (
+    basket_df.group_by("DEALER_CITY", "CUSTOMER_EXTERNAL_CODE", "WEEK_START_DATE")
+    .agg(F.count_distinct("SKU_ERP_CODE").alias("N_SKUS_BASKET"))
+)
+
+multi_baskets = (
+    basket_sizes.filter(F.col("N_SKUS_BASKET") >= 2)
+    .join(
+        basket_df,
+        on=["DEALER_CITY", "CUSTOMER_EXTERNAL_CODE", "WEEK_START_DATE"],
+        how="inner",
+    )
+)
+
+print("Example multi-item baskets:")
+multi_baskets.show(20)
+
+############################
+# 4. SKU PAIRS (PAIR_STATS)
+############################
+
+b1 = multi_baskets.alias("B1")
+b2 = multi_baskets.alias("B2")
+
+pairs = (
+    b1.join(
+        b2,
+        on=(
+            (b1["DEALER_CITY"] == b2["DEALER_CITY"])
+            & (b1["CUSTOMER_EXTERNAL_CODE"] == b2["CUSTOMER_EXTERNAL_CODE"])
+            & (b1["WEEK_START_DATE"] == b2["WEEK_START_DATE"])
+        ),
+        how="inner",
+    )
+    .filter(b1["SKU_ERP_CODE"] < b2["SKU_ERP_CODE"])  # avoid dup/self pairs
+    .select(
+        b1["DEALER_CITY"].alias("DEALER_CITY"),
+        b1["SKU_ERP_CODE"].alias("SKU_A"),
+        b2["SKU_ERP_CODE"].alias("SKU_B"),
+        F.concat_ws(
+            F.lit("|"),
+            b1["DEALER_CITY"],
+            b1["CUSTOMER_EXTERNAL_CODE"],
+            b1["WEEK_START_DATE"],
+        ).alias("BASKET_ID"),
+    )
+)
+
+print("Sample SKU pairs:")
+pairs.show(20)
+
+pair_stats = (
+    pairs.group_by("DEALER_CITY", "SKU_A", "SKU_B")
+    .agg(F.count_distinct("BASKET_ID").alias("PAIR_BASKETS"))
+)
+
+# hard clean of pair_stats schema
+pair_stats = pair_stats.select(
+    F.col("DEALER_CITY").alias("DEALER_CITY"),
+    F.col("SKU_A").alias("SKU_A"),
+    F.col("SKU_B").alias("SKU_B"),
+    F.col("PAIR_BASKETS").alias("PAIR_BASKETS"),
+)
+
+print("Pair stats (first 50):")
+pair_stats.show(50)
+
+############################
+# 5. ITEM SUPPORT & CITY BASKETS
+############################
+
+item_support = (
+    basket_df.select(
+        F.col("DEALER_CITY").alias("DEALER_CITY"),
+        F.col("SKU_ERP_CODE").alias("SKU_ERP_CODE"),
+        F.concat_ws(
+            F.lit("|"),
+            F.col("DEALER_CITY"),
+            F.col("CUSTOMER_EXTERNAL_CODE"),
+            F.col("WEEK_START_DATE"),
+        ).alias("BASKET_ID"),
+    )
+    .group_by("DEALER_CITY", "SKU_ERP_CODE")
+    .agg(F.count_distinct("BASKET_ID").alias("ITEM_BASKETS"))
+)
+
+item_support = item_support.select(
+    F.col("DEALER_CITY").alias("DEALER_CITY"),
+    F.col("SKU_ERP_CODE").alias("SKU_ERP_CODE"),
+    F.col("ITEM_BASKETS").alias("ITEM_BASKETS"),
+)
+
+print("Item support (first 50):")
+item_support.show(50)
+
+city_baskets = (
+    basket_df.select(
+        F.col("DEALER_CITY").alias("DEALER_CITY"),
+        F.concat_ws(
+            F.lit("|"),
+            F.col("DEALER_CITY"),
+            F.col("CUSTOMER_EXTERNAL_CODE"),
+            F.col("WEEK_START_DATE"),
+        ).alias("BASKET_ID"),
+    )
+    .group_by("DEALER_CITY")
+    .agg(F.count_distinct("BASKET_ID").alias("TOTAL_BASKETS_CITY"))
+)
+
+city_baskets = city_baskets.select(
+    F.col("DEALER_CITY").alias("DEALER_CITY"),
+    F.col("TOTAL_BASKETS_CITY").alias("TOTAL_BASKETS_CITY"),
+)
+
+print("City basket counts:")
+city_baskets.show()
+
+############################
+# 6. ASSOCIATION METRICS
+############################
+# support, confidence, lift per city [web:6][web:89]
+
+# Clean copies to avoid identifier weirdness
+pair_stats_clean = pair_stats.select(
+    "DEALER_CITY", "SKU_A", "SKU_B", "PAIR_BASKETS"
+)
+item_support_clean = item_support.select(
+    "DEALER_CITY", "SKU_ERP_CODE", "ITEM_BASKETS"
+)
+city_baskets_clean = city_baskets.select(
+    "DEALER_CITY", "TOTAL_BASKETS_CITY"
+)
+
+# Join item support for A: join on city then filter SKU_A == SKU_ERP_CODE
+assoc_a = (
+    pair_stats_clean.join(
+        item_support_clean,
+        on=["DEALER_CITY"],   # SAME CITY ONLY (pure string key)
+        how="inner",
+    )
+    .filter(F.col("SKU_A") == F.col("SKU_ERP_CODE"))
+    .select(
+        F.col("DEALER_CITY"),
+        F.col("SKU_A"),
+        F.col("SKU_B"),
+        F.col("PAIR_BASKETS"),
+        F.col("ITEM_BASKETS").alias("ITEM_A_BASKETS"),
+    )
+)
+
+# Join item support for B
+assoc_ab = (
+    assoc_a.join(
+        item_support_clean,
+        on=["DEALER_CITY"],   # SAME CITY
+        how="inner",
+    )
+    .filter(F.col("SKU_B") == F.col("SKU_ERP_CODE"))
+    .select(
+        F.col("DEALER_CITY"),
+        F.col("SKU_A"),
+        F.col("SKU_B"),
+        F.col("PAIR_BASKETS"),
+        F.col("ITEM_A_BASKETS"),
+        F.col("ITEM_BASKETS").alias("ITEM_B_BASKETS"),
+    )
+)
+
+# Join city basket counts
+assoc_base = (
+    assoc_ab.join(
+        city_baskets_clean,
+        on=["DEALER_CITY"],
+        how="inner",
+    )
+)
+
+assoc = (
+    assoc_base
+    .with_column(
+        "SUPPORT_PAIR",
+        F.col("PAIR_BASKETS") / F.col("TOTAL_BASKETS_CITY"),
+    )
+    .with_column(
+        "CONF_A_TO_B",
+        F.col("PAIR_BASKETS") / F.col("ITEM_A_BASKETS"),
+    )
+    .with_column(
+        "CONF_B_TO_A",
+        F.col("PAIR_BASKETS") / F.col("ITEM_B_BASKETS"),
+    )
+    .with_column(
+        "LIFT_A_TO_B",
+        F.col("CONF_A_TO_B")
+        / (F.col("ITEM_B_BASKETS") / F.col("TOTAL_BASKETS_CITY")),
+    )
+    .with_column(
+        "LIFT_B_TO_A",
+        F.col("CONF_B_TO_A")
+        / (F.col("ITEM_A_BASKETS") / F.col("TOTAL_BASKETS_CITY")),
+    )
+)
+
+print("Association metrics (first 50):")
+assoc.show(50)
+
+############################
+# 7. CROSS-SELL RULES BY CITY
+############################
+
+s_min = 0.01   # min support
+c_min = 0.20   # min confidence
+
+cross_sell_rules = (
+    assoc.filter(
+        (F.col("SUPPORT_PAIR") >= s_min)
+        & (F.col("CONF_A_TO_B") >= c_min)
+        & (F.col("LIFT_A_TO_B") > 1)
+    )
+    .select(
+        "DEALER_CITY",
+        F.col("SKU_A").alias("SKU_SOURCE"),
+        F.col("SKU_B").alias("SKU_TARGET"),
+        "SUPPORT_PAIR",
+        "CONF_A_TO_B",
+        "LIFT_A_TO_B",
+    )
+    .order_by("DEALER_CITY", F.col("LIFT_A_TO_B").desc())
+)
+
+print("Cross-sell rules (first 100):")
+cross_sell_rules.show(100)
+
+############################
+# 8. CUSTOMER-LEVEL RECOMMENDATIONS (OPTIONAL)
+############################
+
+cutoff_date = date.today() - timedelta(weeks=8)
+
+cust_recent_skus = (
+    orders.filter(F.col("WEEK_START_DATE") >= cutoff_date)
+    .select("DEALER_CITY", "CUSTOMER_EXTERNAL_CODE", "SKU_ERP_CODE")
+    .distinct()
+)
+
+cust_recos = (
+    cust_recent_skus.alias("C")
+    .join(
+        cross_sell_rules.alias("R"),
+        on=(
+            (F.col("C.DEALER_CITY") == F.col("R.DEALER_CITY")) &
+            (F.col("C.SKU_ERP_CODE") == F.col("R.SKU_SOURCE"))
+        ),
+        how="inner",
+    )
+    .join(
+        cust_recent_skus.alias("AL"),
+        on=(
+            (F.col("C.CUSTOMER_EXTERNAL_CODE") == F.col("AL.CUSTOMER_EXTERNAL_CODE")) &
+            (F.col("C.DEALER_CITY") == F.col("AL.DEALER_CITY")) &
+            (F.col("R.SKU_TARGET") == F.col("AL.SKU_ERP_CODE"))
+        ),
+        how="left",
+    )
+    .filter(F.col("AL.SKU_ERP_CODE").is_null())
+    .group_by("C.DEALER_CITY", "C.CUSTOMER_EXTERNAL_CODE", "R.SKU_TARGET")
+    .agg(
+        F.max("R.CONF_A_TO_B").alias("BEST_CONF"),
+        F.max("R.LIFT_A_TO_B").alias("BEST_LIFT"),
+    )
+    .order_by("C.DEALER_CITY", "C.CUSTOMER_EXTERNAL_CODE", F.col("BEST_LIFT").desc())
+)
+
+print("Customer-level recommendations (first 100):")
+cust_recos.show(100)
