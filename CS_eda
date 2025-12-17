@@ -523,3 +523,123 @@ assoc = (
 )
 
 assoc.show(50)
+
+
+
+
+
+
+
+
+
+from snowflake.snowpark import functions as F
+
+# ------------------------------------------------------------------
+# 0) CLEAN UP COLUMN NAMES on the three inputs
+#    (this eliminates things like "DEALER_CITYB1" from their schema)
+# ------------------------------------------------------------------
+pair_stats_clean = pair_stats.select(
+    F.col("DEALER_CITY").alias("DEALER_CITY"),
+    F.col("SKU_A").alias("SKU_A"),
+    F.col("SKU_B").alias("SKU_B"),
+    F.col("PAIR_BASKETS").alias("PAIR_BASKETS"),
+)
+
+item_support_clean = item_support.select(
+    F.col("DEALER_CITY").alias("DEALER_CITY"),
+    F.col("SKU_ERP_CODE").alias("SKU_ERP_CODE"),
+    F.col("ITEM_BASKETS").alias("ITEM_BASKETS"),
+)
+
+city_baskets_clean = city_baskets.select(
+    F.col("DEALER_CITY").alias("DEALER_CITY"),
+    F.col("TOTAL_BASKETS_CITY").alias("TOTAL_BASKETS_CITY"),
+)
+
+# Optional: quickly check schemas if debugging
+# print(pair_stats_clean.schema)
+# print(item_support_clean.schema)
+# print(city_baskets_clean.schema)
+
+# ------------------------------------------------------------------
+# 1) Association joins (NO alias-based column names, only clean cols)
+# ------------------------------------------------------------------
+
+# join item support for A
+assoc_a = (
+    pair_stats_clean.join(
+        item_support_clean,
+        on=[
+            "DEALER_CITY"
+        ],  # same city
+        how="inner",
+    )
+    .filter(F.col("SKU_A") == F.col("SKU_ERP_CODE"))
+    .select(
+        F.col("DEALER_CITY"),
+        F.col("SKU_A"),
+        F.col("SKU_B"),
+        F.col("PAIR_BASKETS"),
+        F.col("ITEM_BASKETS").alias("ITEM_A_BASKETS"),
+    )
+)
+
+# join item support for B
+assoc_ab = (
+    assoc_a.join(
+        item_support_clean,
+        on=[
+            "DEALER_CITY"
+        ],  # same city
+        how="inner",
+    )
+    .filter(F.col("SKU_B") == F.col("SKU_ERP_CODE"))
+    .select(
+        F.col("DEALER_CITY"),
+        F.col("SKU_A"),
+        F.col("SKU_B"),
+        F.col("PAIR_BASKETS"),
+        F.col("ITEM_A_BASKETS"),
+        F.col("ITEM_BASKETS").alias("ITEM_B_BASKETS"),
+    )
+)
+
+# join city basket counts
+assoc_base = (
+    assoc_ab.join(
+        city_baskets_clean,
+        on=["DEALER_CITY"],
+        how="inner",
+    )
+)
+
+# ------------------------------------------------------------------
+# 2) Compute support, confidence, lift on the clean DF
+# ------------------------------------------------------------------
+assoc = (
+    assoc_base
+    .with_column(
+        "SUPPORT_PAIR",
+        F.col("PAIR_BASKETS") / F.col("TOTAL_BASKETS_CITY"),
+    )
+    .with_column(
+        "CONF_A_TO_B",
+        F.col("PAIR_BASKETS") / F.col("ITEM_A_BASKETS"),
+    )
+    .with_column(
+        "CONF_B_TO_A",
+        F.col("PAIR_BASKETS") / F.col("ITEM_B_BASKETS"),
+    )
+    .with_column(
+        "LIFT_A_TO_B",
+        F.col("CONF_A_TO_B")
+        / (F.col("ITEM_B_BASKETS") / F.col("TOTAL_BASKETS_CITY")),
+    )
+    .with_column(
+        "LIFT_B_TO_A",
+        F.col("CONF_B_TO_A")
+        / (F.col("ITEM_A_BASKETS") / F.col("TOTAL_BASKETS_CITY")),
+    )
+)
+
+assoc.show(50)
