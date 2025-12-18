@@ -1,347 +1,38 @@
 import pandas as pd
-import numpy as np
-from datetime import datetime
 
-# Load the data files
-preprocessed_df = pd.read_excel('preprocessed.xlsx')
-dispatch_agg = pd.read_excel('dispatch_agg.xlsx')  # Assuming this is your dispatch file name
+# Read input Excel
+df = pd.read_excel("input.xlsx")   # update filename if needed
 
-# Convert date columns to datetime
-preprocessed_df['DISPATCH_MONTH'] = pd.to_datetime(preprocessed_df['DISPATCH_MONTH'])
-preprocessed_df['WARRANTY_MONTH'] = pd.to_datetime(preprocessed_df['WARRANTY_MONTH'])
-dispatch_agg['DISPATCH_MONTH'] = pd.to_datetime(dispatch_agg['DISPATCH_MONTH'])
+# Rename BIKE_GROUPED -> BIKE_FAMILY
+df = df.rename(columns={
+    "BIKE_GROUPED": "BIKE_FAMILY",
+    "WARRANTY_MONTH": "WARRANTY_MONTHF"
+})
 
-# Group warranty costs by BIKE_GROUPED, DISPATCH_MONTH, and WARRANTY_COST_TYPE
-warranty_summary = preprocessed_df.groupby(
-    ['BIKE_GROUPED', 'DISPATCH_MONTH', 'WARRANTY_COST_TYPE']
-).agg({
-    'WARRANTY_COST': 'sum'
-}).reset_index()
+# Create WARRANTY_COST_PER_UNIT
+df["WARRANTY_COST_PER_UNIT"] = df["WARRANTY_COST"] / df["VOLUME"]
 
-# Pivot to get Actual and Predicted costs in separate columns
-warranty_pivot = warranty_summary.pivot_table(
-    index=['BIKE_GROUPED', 'DISPATCH_MONTH'],
-    columns='WARRANTY_COST_TYPE',
-    values='WARRANTY_COST',
-    fill_value=0
-).reset_index()
-
-# Rename columns
-warranty_pivot.columns.name = None
-if 'Actual' in warranty_pivot.columns:
-    warranty_pivot.rename(columns={'Actual': 'ACTUAL_COSTING'}, inplace=True)
-else:
-    warranty_pivot['ACTUAL_COSTING'] = 0
-
-if 'Predicted' in warranty_pivot.columns:
-    warranty_pivot.rename(columns={'Predicted': 'PRED_COSTING'}, inplace=True)
-else:
-    warranty_pivot['PRED_COSTING'] = 0
-
-# Merge with dispatch volume data
-final_df = pd.merge(
-    dispatch_agg[['BIKE_GROUPED', 'DISPATCH_MONTH', 'VOLUME']],
-    warranty_pivot,
-    on=['BIKE_GROUPED', 'DISPATCH_MONTH'],
-    how='left'
+# Create INCOMPLETE_COMPLETE_WARRANTY
+df["INCOMPLETE_COMPLETE_WARRANTY"] = df["WARRANTY_COST_TYPE"].map(
+    {
+        "Actual": "COMPLETE",
+        "PREDICTED": "INCOMPLETE"
+    }
 )
 
-# Fill NaN values with 0 for warranty costs
-final_df['ACTUAL_COSTING'] = final_df['ACTUAL_COSTING'].fillna(0)
-final_df['PRED_COSTING'] = final_df['PRED_COSTING'].fillna(0)
-
-# Calculate required fields
-final_df['TOTAL_WARRANTY_COST'] = final_df['ACTUAL_COSTING'] + final_df['PRED_COSTING']
-final_df['TOTAL_COST_PER_UNIT'] = final_df['TOTAL_WARRANTY_COST'] / final_df['VOLUME']
-final_df['ACTUAL_COSTING_PER_UNIT'] = final_df['ACTUAL_COSTING'] / final_df['VOLUME']
-final_df['PRED_COSTING_PER_UNIT'] = final_df['PRED_COSTING'] / final_df['VOLUME']
-
-# Determine if warranty is Complete or Incomplete
-final_df['INCOMPLETE_COMPLETE_WARRANTY'] = final_df.apply(
-    lambda row: 'INCOMPLETE' if row['PRED_COSTING'] > 0 else 'COMPLETE',
-    axis=1
-)
-
-# Replace inf values with 0 (in case of division by zero)
-final_df.replace([np.inf, -np.inf], 0, inplace=True)
-
-# Filter data starting from 2015-01-01
-start_date = pd.to_datetime('2015-01-01')
-final_df = final_df[final_df['DISPATCH_MONTH'] >= start_date].copy()
-
-# Sort by BIKE_GROUPED and DISPATCH_MONTH
-final_df = final_df.sort_values(['BIKE_GROUPED', 'DISPATCH_MONTH']).reset_index(drop=True)
-
-# Calculate historical cumulative columns
-final_df['HISTORICAL_VOLUME'] = final_df.groupby('BIKE_GROUPED')['VOLUME'].cumsum()
-final_df['HISTORICAL_TOTAL_COST'] = final_df.groupby('BIKE_GROUPED')['TOTAL_WARRANTY_COST'].cumsum()
-final_df['HISTORICAL_ACTUAL_COST'] = final_df.groupby('BIKE_GROUPED')['ACTUAL_COSTING'].cumsum()
-final_df['HISTORICAL_PRED_COST'] = final_df.groupby('BIKE_GROUPED')['PRED_COSTING'].cumsum()
-
-# Calculate historical per unit costs
-final_df['HISTORICAL_TOTAL_COST_PER_UNIT'] = final_df['HISTORICAL_TOTAL_COST'] / final_df['HISTORICAL_VOLUME']
-final_df['HISTORICAL_ACTUAL_COST_PER_UNIT'] = final_df['HISTORICAL_ACTUAL_COST'] / final_df['HISTORICAL_VOLUME']
-final_df['HISTORICAL_PRED_COST_PER_UNIT'] = final_df['HISTORICAL_PRED_COST'] / final_df['HISTORICAL_VOLUME']
-
-# Replace inf values with 0 (in case of division by zero)
-final_df.replace([np.inf, -np.inf], 0, inplace=True)
-
-# Select and order columns
-final_df = final_df[[
-    'DISPATCH_MONTH',
-    'VOLUME',
-    'TOTAL_WARRANTY_COST',
-    'TOTAL_COST_PER_UNIT',
-    'INCOMPLETE_COMPLETE_WARRANTY',
-    'ACTUAL_COSTING',
-    'ACTUAL_COSTING_PER_UNIT',
-    'PRED_COSTING',
-    'PRED_COSTING_PER_UNIT',
-    'HISTORICAL_VOLUME',
-    'HISTORICAL_TOTAL_COST',
-    'HISTORICAL_TOTAL_COST_PER_UNIT',
-    'HISTORICAL_ACTUAL_COST',
-    'HISTORICAL_ACTUAL_COST_PER_UNIT',
-    'HISTORICAL_PRED_COST',
-    'HISTORICAL_PRED_COST_PER_UNIT',
-    'BIKE_GROUPED'
-]]
-
-# Format DISPATCH_MONTH as mm-yyyy
-final_df['DISPATCH_MONTH'] = final_df['DISPATCH_MONTH'].dt.strftime('%m-%Y')
-
-# Get unique bike groups
-bike_groups = final_df['BIKE_GROUPED'].unique()
-
-# Create Excel writer object
-output_filename = 'Warranty_Analysis_By_Bike.xlsx'
-writer = pd.ExcelWriter(output_filename, engine='openpyxl')
-
-# Write each bike group to a separate sheet
-for bike_group in bike_groups:
-    # Filter data for current bike group
-    bike_df = final_df[final_df['BIKE_GROUPED'] == bike_group].copy()
-    
-    # Drop BIKE_GROUPED column as it's redundant in individual sheets
-    bike_df = bike_df.drop('BIKE_GROUPED', axis=1)
-    
-    # Create valid sheet name (Excel has 31 char limit and some special chars are not allowed)
-    sheet_name = str(bike_group)[:31]
-    sheet_name = sheet_name.replace('/', '_').replace('\\', '_').replace('*', '_').replace('?', '_').replace('[', '_').replace(']', '_')
-    
-    # Write to Excel
-    bike_df.to_excel(writer, sheet_name=sheet_name, index=False)
-    
-    print(f"Sheet created for: {bike_group} (Rows: {len(bike_df)})")
-
-# Create a summary sheet with all data
-final_df.to_excel(writer, sheet_name='All_Data', index=False)
-print(f"
-Summary sheet 'All_Data' created with {len(final_df)} rows")
-
-# Save and close the writer
-writer.close()
-
-print(f"
-✓ Analysis complete! File saved as: {output_filename}")
-print(f"✓ Total sheets created: {len(bike_groups) + 1} ({len(bike_groups)} bike groups + 1 summary)")
-
-# Display summary statistics
-print("
-" + "="*80)
-print("SUMMARY STATISTICS BY BIKE GROUP")
-print("="*80)
-
-summary_stats = final_df.groupby('BIKE_GROUPED').agg({
-    'VOLUME': 'sum',
-    'TOTAL_WARRANTY_COST': 'sum',
-    'ACTUAL_COSTING': 'sum',
-    'PRED_COSTING': 'sum'
-}).reset_index()
-
-summary_stats['AVG_COST_PER_UNIT'] = summary_stats['TOTAL_WARRANTY_COST'] / summary_stats['VOLUME']
-summary_stats = summary_stats.round(2)
-
-print(summary_stats.to_string(index=False))
-
-# Count incomplete vs complete warranties
-print("
-" + "="*80)
-print("WARRANTY STATUS DISTRIBUTION")
-print("="*80)
-
-status_dist = final_df.groupby(['BIKE_GROUPED', 'INCOMPLETE_COMPLETE_WARRANTY']).size().reset_index(name='COUNT')
-status_pivot = status_dist.pivot_table(
-    index='BIKE_GROUPED',
-    columns='INCOMPLETE_COMPLETE_WARRANTY',
-    values='COUNT',
-    fill_value=0
-).reset_index()
-
-print(status_pivot.to_string(index=False))
-
-
-
-
-
-
-
-
-
-
-Warranty Analysis - Variable Descriptions
-
-DISPATCH_MONTH - The month and year when bike units were dispatched from the plant, formatted as mm-YYYY (e.g., 01-2015). This represents the cohort date for tracking warranty performance.
-
-VOLUME - The total number of bike units dispatched in the corresponding dispatch month for the specific bike model.
-
-TOTAL_WARRANTY_COST - The complete warranty cost for units dispatched in the given month, combining both actual costs incurred and predicted future costs (Actual Costing + Predicted Costing).
-
-TOTAL_COST_PER_UNIT - The average total warranty cost per bike unit for the dispatch cohort, calculated as Total Warranty Cost divided by Volume.
-
-INCOMPLETE_COMPLETE_WARRANTY - Indicates whether the warranty period has fully matured ("COMPLETE") or is still ongoing with predicted costs ("INCOMPLETE").
-
-ACTUAL_COSTING - Warranty costs that have actually been incurred and recorded to date for units dispatched in the given month (WARRANTY_COST_TYPE = 'Actual').
-
-ACTUAL_COSTING_PER_UNIT - The average actual warranty cost per unit for the dispatch cohort, calculated as Actual Costing divided by Volume.
-
-PRED_COSTING - Estimated future warranty costs for units dispatched in the given month based on predictive models (WARRANTY_COST_TYPE = 'Predicted').
-
-PRED_COSTING_PER_UNIT - The average predicted warranty cost per unit for the dispatch cohort, calculated as Predicted Costing divided by Volume.
-
-HISTORICAL_VOLUME - Cumulative sum of all bike units dispatched from the beginning of the analysis period up to and including the current dispatch month for the specific bike model.
-
-HISTORICAL_TOTAL_COST - Cumulative sum of all total warranty costs (actual + predicted) from the beginning of the analysis period up to and including the current dispatch month.
-
-HISTORICAL_TOTAL_COST_PER_UNIT - The average warranty cost per unit on a cumulative basis, calculated as Historical Total Cost divided by Historical Volume, representing lifetime average warranty cost.
-
-HISTORICAL_ACTUAL_COST - Cumulative sum of all actual warranty costs incurred from the beginning of the analysis period up to and including the current dispatch month.
-
-HISTORICAL_ACTUAL_COST_PER_UNIT - The average actual warranty cost per unit on a cumulative basis, calculated as Historical Actual Cost divided by Historical Volume.
-
-HISTORICAL_PRED_COST - Cumulative sum of all predicted warranty costs from the beginning of the analysis period up to and including the current dispatch month.
-
-HISTORICAL_PRED_COST_PER_UNIT - The average predicted warranty cost per unit on a cumulative basis, calculated as Historical Predicted Cost divided by Historical Volume.
-
-Analysis Period: January 2015 onwards (or first available data)
-Data Sources: preprocessed.xlsx, dispatch_agg.xlsx
-
-
-
-
-
-
-
-
-
-WARRANTY ANALYSIS - REAL EXAMPLE INTERPRETATION
-Dispatch Month: July 2021 (07-2021)
-
-COMPLETE DATA WITH CALCULATIONS:
-
-DISPATCH_MONTH: 07-2021
-VOLUME: 223,883 bikes
-TOTAL_WARRANTY_COST: ₹39,431,553
-TOTAL_COST_PER_UNIT: ₹176.14 (39,431,553 ÷ 223,883)
-INCOMPLETE_COMPLETE_WARRANTY: INCOMPLETE
-ACTUAL_COSTING: ₹35,168,291
-ACTUAL_COSTING_PER_UNIT: ₹157.08 (35,168,291 ÷ 223,883)
-PRED_COSTING: ₹4,263,262
-PRED_COSTING_PER_UNIT: ₹19.04 (4,263,262 ÷ 223,883)
-HISTORICAL_VOLUME: 13,767,088 bikes
-HISTORICAL_TOTAL_COST: ₹1,532,379,773
-HISTORICAL_TOTAL_COST_PER_UNIT: ₹111.33 (1,532,379,773 ÷ 13,767,088)
-HISTORICAL_ACTUAL_COST: ₹1,506,378,294
-HISTORICAL_ACTUAL_COST_PER_UNIT: ₹109.44 (1,506,378,294 ÷ 13,767,088)
-HISTORICAL_PRED_COST: ₹26,001,479
-HISTORICAL_PRED_COST_PER_UNIT: ₹1.89 (26,001,479 ÷ 13,767,088)
-
-===============================================================================
-HOW TO READ EACH VARIABLE - JULY 2021 EXAMPLE:
-===============================================================================
-
-DISPATCH_MONTH (07-2021):
-In July 2021, bikes were dispatched from the manufacturing plant to dealers and customers. This is your cohort tracking date.
-
-VOLUME (223,883):
-223,883 bikes were dispatched in July 2021. This is a large dispatch month representing the population that could potentially file warranty claims.
-
-TOTAL_WARRANTY_COST (₹39,431,553):
-The complete warranty burden for these 223,883 bikes is ₹3.94 crores. This combines both claims already paid (₹3.52 crores actual) and claims still expected (₹42.6 lakhs predicted).
-
-TOTAL_COST_PER_UNIT (₹176.14):
-On average, each bike dispatched in July 2021 will cost ₹176.14 in warranty over its entire lifecycle. This is your total lifetime warranty cost per bike for this cohort.
-
-INCOMPLETE_COMPLETE_WARRANTY (INCOMPLETE):
-The warranty period is still ongoing for July 2021 bikes. Some bikes are still under warranty coverage, which is why we have predicted costs. The warranty hasn't fully matured yet.
-
-ACTUAL_COSTING (₹35,168,291):
-To date, customers with July 2021 bikes have filed warranty claims totaling ₹3.52 crores. These are real, already-paid claims - actual money spent from your warranty budget.
-
-ACTUAL_COSTING_PER_UNIT (₹157.08):
-On average, each July 2021 bike has already cost ₹157.08 in warranty claims so far. This represents 89% of the total expected cost (₹157.08 / ₹176.14 = 89%).
-
-PRED_COSTING (₹4,263,262):
-Your predictive model estimates that July 2021 bikes will generate another ₹42.6 lakhs in warranty claims before all warranty periods expire. This is your outstanding liability for this cohort.
-
-PRED_COSTING_PER_UNIT (₹19.04):
-We expect each July 2021 bike to generate another ₹19.04 in future warranty claims on average. This represents only 11% of total expected cost, indicating this cohort is nearly mature.
-
-HISTORICAL_VOLUME (13,767,088):
-From the start of your analysis period (likely January 2015) through July 2021, you've dispatched a cumulative total of 1.38 crore bikes for this bike model. This includes all previous months plus July 2021's 223,883 bikes.
-
-HISTORICAL_TOTAL_COST (₹1,532,379,773):
-All dispatch months from the beginning through July 2021 have accumulated ₹153.24 crores in total warranty costs (actual + predicted). This is your cumulative warranty burden across all historical cohorts.
-
-HISTORICAL_TOTAL_COST_PER_UNIT (₹111.33):
-Across all 1.38 crore bikes dispatched from start through July 2021, the average warranty cost per bike is ₹111.33. This is your long-term baseline warranty cost for this bike model.
-
-HISTORICAL_ACTUAL_COST (₹1,506,378,294):
-Out of ₹153.24 crores total historical cost, ₹150.64 crores has already been paid out in actual warranty claims. This represents 98.3% realization rate, indicating most of your historical fleet has matured warranties.
-
-HISTORICAL_ACTUAL_COST_PER_UNIT (₹109.44):
-The 1.38 crore cumulative bikes have generated ₹109.44 per bike in actual warranty costs on average. This is very close to the total historical average (₹111.33), showing high maturity.
-
-HISTORICAL_PRED_COST (₹26,001,479):
-Out of ₹153.24 crores total historical cost, only ₹2.6 crores is still predicted (outstanding future claims). This is just 1.7% of total costs, indicating your fleet is highly mature.
-
-HISTORICAL_PRED_COST_PER_UNIT (₹1.89):
-On average, each of the 1.38 crore cumulative bikes has only ₹1.89 in remaining predicted warranty exposure. This low value indicates most warranties have expired or nearly expired.
-
-===============================================================================
-CRITICAL INSIGHTS FROM JULY 2021 DATA:
-===============================================================================
-
-1. HIGH-COST COHORT ALERT:
-   July 2021 bikes cost ₹176.14 per unit, which is 58% HIGHER than the historical 
-   average of ₹111.33. This is a significant red flag indicating:
-   - Potential quality issues with July 2021 production
-   - Design changes that increased failure rates
-   - Manufacturing defects in this batch
-   → RECOMMENDATION: Investigate July 2021 production processes and component suppliers
-
-2. WARRANTY MATURITY:
-   89% of July 2021's warranty cost has already been realized (₹157.08 actual / 
-   ₹176.14 total). With only 11% remaining predicted, this cohort is approaching 
-   full maturity. Most bikes are nearing end of warranty period.
-
-3. FLEET MATURITY STATUS:
-   Overall fleet is highly mature with 98.3% actual costs realized. Only ₹2.6 crores 
-   in predicted costs remain across 1.38 crore bikes. This indicates:
-   - Most bikes are past warranty period
-   - Reliable historical baseline (₹111.33 per unit)
-   - Low outstanding warranty liability
-
-4. FINANCIAL IMPACT:
-   July 2021 alone accounts for:
-   - 223,883 bikes (1.6% of cumulative volume)
-   - ₹39.4 million warranty cost (2.6% of cumulative cost)
-   - But disproportionately high per-unit cost
-   
-5. FORECASTING RELIABILITY:
-   With only ₹19.04 per unit remaining in predicted costs for July 2021, your 
-   forecast uncertainty is low. The final cost will likely be very close to ₹176.14.
-
-6. TREND COMPARISON:
-   July 2021 actual cost (₹157.08) is already 44% higher than the historical 
-   average (₹109.44), confirming this is an outlier cohort requiring attention.
+# Select final required columns in order
+final_df = df[
+    [
+        "BIKE_FAMILY",
+        "DISPATCH_MONTH",
+        "WARRANTY_MONTHF",
+        "AGE",
+        "VOLUME",
+        "WARRANTY_COST",
+        "WARRANTY_COST_PER_UNIT",
+        "INCOMPLETE_COMPLETE_WARRANTY"
+    ]
+]
+
+# Write to new Excel file
+final_df.to_excel("output.xlsx", index=False)
