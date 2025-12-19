@@ -1,0 +1,172 @@
+# Install dependencies (run once in a notebook cell)
+%pip install polars openpyxl -q
+
+# =========================
+# 1. Imports
+# =========================
+import polars as pl
+import openpyxl
+from openpyxl.styles import Font, Alignment, Border, Side
+from openpyxl.utils import get_column_letter
+
+# =========================
+# 2. Load your data
+# =========================
+# Replace this with your actual loading logic.
+# Your df MUST have at least these columns:
+# ACTUAL_QUANTITY, PREDICTED_QUANTITY, DEALER_CODE, DEALER_STATE,
+# ZONAL_OFFICE_NAME, AREA_OFFICE_NAME
+
+# Example dummy data (DELETE and replace with your data)
+df = pl.DataFrame({
+    "CUSTOMER_EXTERNAL_CODE": ["C1","C2","C1","C3","C2"],
+    "SKU_ERP_CODE": ["S1","S2","S1","S3","S2"],
+    "WEEK_START_DATE": ["2025-01-01"] * 5,
+    "ACTUAL_QUANTITY": [5, 12, 27, 38, 44],
+    "PREDICTED_QUANTITY": [4, 15, 20, 40, 50],
+    "DEALER_CODE": ["D1","D2","D1","D3","D2"],
+    "DEALER_STATE": ["MH","GJ","MH","KA","GJ"],
+    "ZONAL_OFFICE_NAME": ["Z1","Z2","Z1","Z3","Z2"],
+    "AREA_OFFICE_NAME": ["A1","A2","A1","A3","A2"],
+})
+
+# If using CSV:
+# df = pl.read_csv("your_predictions.csv")
+
+df.head()
+
+
+# =========================
+# 3. Add absolute error column
+# =========================
+df_err = df.with_columns(
+    (pl.col("ACTUAL_QUANTITY") - pl.col("PREDICTED_QUANTITY"))
+    .abs()
+    .alias("ABS_ERROR")
+)
+df_err.head()
+
+
+# =========================
+# 4. Helper: MAE by dimension
+# =========================
+def mae_by(df: pl.DataFrame, group_col: str) -> pl.DataFrame:
+    return (
+        df.group_by(group_col)
+          .agg([
+              pl.mean("ABS_ERROR").alias("MAE"),
+              pl.count("ABS_ERROR").alias("Count"),
+          ])
+          .sort("MAE")
+    )
+
+mae_dealer = mae_by(df_err, "DEALER_CODE")
+mae_state  = mae_by(df_err, "DEALER_STATE")
+mae_zonal  = mae_by(df_err, "ZONAL_OFFICE_NAME")
+mae_area   = mae_by(df_err, "AREA_OFFICE_NAME")
+
+mae_dealer
+
+
+# =========================
+# 5. Quantity bins MAE (0–10, 10–20, …, 40–50)
+# =========================
+bins = [0, 10, 20, 30, 40, 50]
+labels = ["0-10", "10-20", "20-30", "30-40", "40-50"]
+
+df_binned = df_err.with_columns(
+    pl.col("ACTUAL_QUANTITY").cut(breaks=bins, labels=labels).alias("QTY_BIN")
+)
+
+mae_qty = (
+    df_binned
+    .group_by("QTY_BIN")
+    .agg([
+        pl.mean("ABS_ERROR").alias("MAE"),
+        pl.count("ABS_ERROR").alias("Count"),
+        pl.mean("ACTUAL_QUANTITY").alias("Avg_Actual_Qty"),
+    ])
+    .sort("QTY_BIN")
+)
+
+mae_qty
+
+
+# =========================
+# 6. Helper: write Polars df to Excel sheet (openpyxl)
+# =========================
+def write_pl_df_to_ws(ws, pdf: pl.DataFrame, title: str | None = None):
+    border = Border(
+        left=Side(style="thin"),
+        right=Side(style="thin"),
+        top=Side(style="thin"),
+        bottom=Side(style="thin"),
+    )
+    header_font = Font(bold=True)
+    center = Alignment(horizontal="center", vertical="center")
+
+    start_row = 1
+    if title is not None:
+        ws.cell(row=1, column=1, value=title)
+        ws.merge_cells(
+            start_row=1,
+            start_column=1,
+            end_row=1,
+            end_column=len(pdf.columns),
+        )
+        ws["A1"].font = Font(bold=True)
+        ws["A1"].alignment = center
+        start_row = 3
+
+    # Header
+    for j, col in enumerate(pdf.columns, start=1):
+        cell = ws.cell(row=start_row, column=j, value=col)
+        cell.font = header_font
+        cell.alignment = center
+        cell.border = border
+
+    # Data
+    for i, row in enumerate(pdf.to_dicts(), start=start_row + 1):
+        for j, col in enumerate(pdf.columns, start=1):
+            val = row[col]
+            cell = ws.cell(row=i, column=j, value=val)
+            cell.border = border
+            if isinstance(val, (int, float)):
+                cell.alignment = center
+
+    # Autosize columns
+    for j in range(1, len(pdf.columns) + 1):
+        col_letter = get_column_letter(j)
+        max_len = 0
+        for cell in ws[col_letter]:
+            if cell.value is not None:
+                max_len = max(max_len, len(str(cell.value)))
+        ws.column_dimensions[col_letter].width = max_len + 2
+
+
+# =========================
+# 7. Build Excel workbook with separate sheets
+# =========================
+wb = openpyxl.Workbook()
+# Remove default sheet
+wb.remove(wb.active)
+
+ws_dealer = wb.create_sheet("MAE_by_Dealer")
+write_pl_df_to_ws(ws_dealer, mae_dealer, title="MAE by Dealer Code")
+
+ws_state = wb.create_sheet("MAE_by_State")
+write_pl_df_to_ws(ws_state, mae_state, title="MAE by State")
+
+ws_zonal = wb.create_sheet("MAE_by_Zonal")
+write_pl_df_to_ws(ws_zonal, mae_zonal, title="MAE by Zonal Office")
+
+ws_area = wb.create_sheet("MAE_by_Area")
+write_pl_df_to_ws(ws_area, mae_area, title="MAE by Area Office")
+
+ws_qty = wb.create_sheet("MAE_by_Quantity")
+write_pl_df_to_ws(ws_qty, mae_qty, title="MAE by Quantity Bin")
+
+output_path = "mae_analysis_polars.xlsx"
+wb.save(output_path)
+
+output_path  # shows the file name created
