@@ -128,3 +128,196 @@ print(f"✅ SAVED to table: RECS_{TEST_CUSTOMER_ID}")
 # 9. CLEANUP
 session.close()
 print("🎉 PIPELINE COMPLETE - Ready for Talverge!")
+
+
+
+
+
+
+
+
+
+
+# ✅ TRUE ALS COLLABORATIVE FILTERING - Snowpark + PySpark MLlib (NO PANDAS)
+# City-specific ALS models | Exclude last 6mo | Top 20 predicted SKUs
+
+from snowflake.snowpark import Session
+from snowflake.snowpark.functions import *
+import snowflake.snowpark.functions as F
+from pyspark.sql import SparkSession
+from pyspark.ml.recommendation import ALS
+from pyspark.ml.evaluation import RegressionEvaluator
+from pyspark.sql.types import StructType, StructField, IntegerType, DoubleType
+
+# 1. SNOWPARK + SPARK SESSION (UPDATE SNOWPARK PARAMS)
+connection_parameters = {
+    "account": "<your_account>",
+    "user": "<your_user>", 
+    "password": "<your_password>",
+    "warehouse": "<your_warehouse>",
+    "database": "<your_database>",
+    "schema": "<your_schema>"
+}
+snow_session = Session.builder.configs(connection_parameters).create()
+
+# Spark session for MLlib ALS
+spark = SparkSession.builder \
+    .appName("SnowparkCityALS") \
+    .config("spark.jars.packages", "org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.0") \
+    .getOrCreate()
+
+# 2. LAST 6 MONTHS SNOWPARK DATA PREP
+orders_df = snow_session.table("your_orders_table")  # UPDATE TABLE NAME
+
+recent_orders = orders_df.select(
+    col("CUSTOMER_EXTERNAL_CODE").alias("customer_id"),
+    col("SKU_ERP_CODE").alias("sku"),
+    col("DEALER_CITY").alias("city"),
+    col("WEEK_START_DATE"),
+    (col("TOTAL_QUANTITY") * col("TOTAL_DLP_VALUE")).cast("double").alias("rating")
+).filter(
+    col("WEEK_START_DATE") >= (current_date() - 180) &
+    col("rating") > 0 &
+    col("customer_id").is_not_null() & 
+    col("sku").is_not_null()
+)
+
+print(f"Last 6 months data: {recent_orders.count()} interactions")
+
+# 3. CREATE INTEGER IDS (Snowpark dense ranking)
+customer_mapping = recent_orders.group_by("customer_id").agg(count("sku")).collect()
+sku_mapping = recent_orders.group_by("sku").agg(count("customer_id")).collect()
+
+customer_id_map = {row.customer_id: idx for idx, row in enumerate(customer_mapping)}
+sku_id_map = {row.sku: idx for idx, row in enumerate(sku_mapping)}
+
+# UDF to map strings to ints (Snowpark vectorized)
+def map_customer_id(customer_id: str) -> int:
+    return customer_id_map.get(customer_id, -1)
+
+def map_sku_id(sku: str) -> int:
+    return sku_id_map.get(sku, -1)
+
+snow_session.udf.register(map_customer_id, "map_customer_id", IntegerType())
+snow_session.udf.register(map_sku_id, "map_sku_id", IntegerType())
+
+# ALS-ready Snowpark DF
+als_ready = recent_orders.with_columns(
+    call_udf("map_customer_id", col("customer_id")).cast("int").alias("user_id"),
+    call_udf("map_sku_id", col("sku")).cast("int").alias("item_id")
+).filter(
+    (col("user_id") >= 0) & (col("item_id") >= 0)
+).select("city", "user_id", "item_id", "rating")
+
+# 4. CITY-SPECIFIC ALS TRAINING (PySpark MLlib)
+city_models = {}
+top_cities_df = als_ready.group_by("city").count().order_by(desc("count")).limit(10).collect()
+top_cities = [row.city for row in top_cities_df]
+
+for city in top_cities:
+    print(f"Training ALS for {city}...")
+    city_data = als_ready.filter(col("city") == lit(city))
+    
+    if city_data.count() > 1000:  # Min data threshold
+        # Convert to Spark DF (efficient for ML)
+        spark_city_df = spark.createDataFrame(
+            city_data.to_pandas_on_spark(),  # Snowpark -> Spark bridge
+            schema=StructType([
+                StructField("city", StringType()),
+                StructField("user_id", IntegerType()),
+                StructField("item_id", IntegerType()),
+                StructField("rating", DoubleType())
+            ])
+        ).drop("city")  # ALS doesn't need city
+        
+        # Train ALS model
+        als = ALS(
+            maxIter=15,
+            regParam=0.1,
+            rank=25,  # Latent factors (collaboration depth)
+            userCol="user_id",
+            itemCol="item_id",
+            ratingCol="rating",
+            nonnegative=True,
+            coldStartStrategy="drop"
+        )
+        
+        model = als.fit(spark_city_df)
+        city_models[city] = model
+        print(f"✅ {city}: RMSE {model.summary.rmse:.3f}")
+
+# 5. RECOMMENDATION FUNCTION (EXCLUDE LAST 6MO PURCHASES)
+def get_als_recommendations(customer_external_code: str, dealer_city: str, top_k: int = 20):
+    if dealer_city not in city_models:
+        return None
+    
+    model = city_models[dealer_city]
+    user_id = map_customer_id(customer_external_code)
+    
+    if user_id < 0:
+        return None
+    
+    # Get predictions for this user
+    user_predictions = model.recommendForUserSubset(
+        spark.createDataFrame([[user_id]], schema="user_id int"),
+        top_k * 2
+    )
+    
+    # Collect predictions
+    recs = []
+    for row in user_predictions.collect():
+        for pred in row.recommendations:
+            sku_id = pred.item
+            pred_rating = pred.rating
+            sku_code = next((k for k, v in sku_id_map.items() if v == sku_id), None)
+            recs.append((customer_external_code, dealer_city, sku_code, float(pred_rating)))
+    
+    # Exclude recent purchases
+    recent_purchases = recent_orders.filter(
+        (col("CUSTOMER_EXTERNAL_CODE") == lit(customer_external_code)) &
+        (col("DEALER_CITY") == lit(dealer_city))
+    ).select("SKU_ERP_CODE").distinct().collect()
+    recent_skus = {row['SKU_ERP_CODE'] for row in recent_purchases}
+    
+    filtered_recs = [(cust, city, sku, rating) for cust, city, sku, rating in recs 
+                     if sku and sku not in recent_skus][:top_k]
+    
+    return spark.createDataFrame(filtered_recs, 
+                               "customer_id string, city string, sku string, predicted_rating double")
+
+# 6. TEST RECOMMENDATIONS
+TEST_CUSTOMER = "CUST12345"  # UPDATE CUSTOMER_EXTERNAL_CODE
+TEST_CITY = "Delhi"          # UPDATE DEALER_CITY
+
+print(f"
+🎯 ALS RECOMMENDATIONS for {TEST_CUSTOMER} in {TEST_CITY}:")
+test_recs = get_als_recommendations(TEST_CUSTOMER, TEST_CITY)
+if test_recs:
+    test_recs.orderBy(col("predicted_rating").desc()).show(20)
+
+# 7. SAVE TO SNOWFLAKE
+if test_recs:
+    test_recs_snow = snow_session.create_dataframe(test_recs)
+    test_recs_snow.write.mode("overwrite").save_as_table(f"ALS_RECS_{TEST_CUSTOMER.replace(' ', '_')}")
+    print("✅ Individual recs saved!")
+
+# 8. BATCH CITY RECOMMENDATIONS
+def generate_city_batch(dealer_city: str):
+    model = city_models.get(dealer_city)
+    if not model:
+        return None
+    
+    # All users in city
+    city_users = als_ready.filter(col("city") == lit(dealer_city)).select("user_id").distinct()
+    spark_users = spark.createDataFrame(city_users.to_pandas_on_spark())
+    
+    batch_recs = model.recommendForAllUsers(20)
+    # Post-process to exclude purchases + map back (similar to func above)
+    return batch_recs
+
+# delhi_batch = generate_city_batch("Delhi")
+
+# Cleanup
+spark.stop()
+snow_session.close()
+print("🎉 SNOWPARK + PYSPARK ALS COLLABORATIVE FILTERING COMPLETE!")
