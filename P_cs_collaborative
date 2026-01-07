@@ -1,11 +1,12 @@
-# Complete Snowpark code: Top 20 city-popular products NOT bought by customer in last 6 months
+# ✅ FINAL SNOWPARK CODE - Top 20 city-popular products NOT bought in last 6 months
+# Uses: CUSTOMER_EXTERNAL_CODE, SKU_ERP_CODE, DEALER_CITY, WEEK_START_DATE, TOTAL_QUANTITY, TOTAL_DLP_VALUE
+
 from snowflake.snowpark import Session
 from snowflake.snowpark.functions import *
 from snowflake.snowpark.types import StructType, StructField, IntegerType, StringType
 import snowflake.snowpark.functions as F
-from datetime import datetime, timedelta
 
-# 1. Setup Snowpark Session (UPDATE YOUR CONNECTION PARAMS)
+# 1. SETUP - UPDATE YOUR CONNECTION PARAMS
 connection_parameters = {
     "account": "<your_account>",
     "user": "<your_user>", 
@@ -16,16 +17,15 @@ connection_parameters = {
 }
 session = Session.builder.configs(connection_parameters).create()
 
-# 2. Load and prepare orders data (UPDATE TABLE NAME)
-orders_df = session.table("your_orders_table")  # REPLACE WITH YOUR TABLE
+# 2. LOAD ORDERS - UPDATE TABLE NAME
+orders_df = session.table("your_orders_table")  # REPLACE WITH YOUR TABLE NAME
 
-# Calculate 6 months ago date
-six_months_ago = (current_date() - 180).alias("six_months_ago")
+# 3. LAST 6 MONTHS FILTER + SCORE
+six_months_ago = (current_date() - 180).alias("cutoff_date")
 
-# Clean and filter recent orders (last 6 months)
 recent_orders = orders_df.select(
     col("CUSTOMER_EXTERNAL_CODE").alias("customer_id"),
-    col("SKU_ERP_CODE").alias("product_id"), 
+    col("SKU_ERP_CODE").alias("sku"), 
     col("TOTAL_QUANTITY"),
     col("TOTAL_DLP_VALUE"),
     col("DEALER_CITY").alias("city"),
@@ -33,90 +33,98 @@ recent_orders = orders_df.select(
 ).filter(
     (col("TOTAL_QUANTITY") > 0) & 
     (col("TOTAL_DLP_VALUE") > 0) &
-    (col("WEEK_START_DATE") >= six_months_ago) &
-    col("customer_id").is_not_null() &
-    col("product_id").is_not_null()
+    (col("WEEK_START_DATE") >= col("cutoff_date")) &
+    col("CUSTOMER_EXTERNAL_CODE").is_not_null() &
+    col("SKU_ERP_CODE").is_not_null()
 ).with_column(
     "score", col("TOTAL_QUANTITY") * col("TOTAL_DLP_VALUE")
 )
 
-print(f"Recent orders (last 6 months): {recent_orders.count()}")
+print(f"✅ Recent orders (last 6 months): {recent_orders.count()} records")
 
-# 3. For each city: Get TOP 20 popular products
-city_popular_products = recent_orders.group_by("city", "product_id").agg(
+# 4. TOP 20 POPULAR SKUs PER CITY
+city_popular_skus = recent_orders.group_by("city", "sku").agg(
     sum_("score").alias("city_popularity_score"),
-    count("customer_id").alias("city_buyers_count"),
+    count_distinct("customer_id").alias("city_buyers_count"),
     avg("score").alias("avg_score")
 ).with_column(
     "popularity_rank",
-    row_number().over(
-        Window.partition_by("city").order_by(desc("city_popularity_score"), desc("city_buyers_count"))
-    )
+    row_number().over(Window.partition_by("city").order_by(desc("city_popularity_score"), desc("city_buyers_count")))
 ).filter(col("popularity_rank") <= 20)
 
-print(f"Top 20 products per city: {city_popular_products.count()}")
+print(f"✅ Top 20 SKUs per city: {city_popular_skus.count()} records")
+city_popular_skus.show(5)
 
-# 4. FUNCTION: Get recommendations for specific customer
+# 5. CORE FUNCTION: Recommendations for ONE customer
 def get_customer_recommendations(customer_id, city_name):
     """
-    Returns TOP 20 city-popular products NOT bought by customer in last 6 months
+    TOP 20 city-popular SKUs customer hasn't bought in last 6 months
     """
-    # Customer's recent purchases
-    customer_purchases = recent_orders.filter(
+    # Customer's LAST 6 MONTHS purchases
+    customer_recent_skus = recent_orders.filter(
         col("customer_id") == lit(customer_id)
-    ).select("product_id").distinct()
+    ).select("sku").distinct()
     
-    # Top 20 popular in their city (excluding their purchases)
-    city_top_products = city_popular_products.filter(
+    # City TOP 20 excluding customer's purchases
+    recommendations = city_popular_skus.filter(
         (col("city") == lit(city_name)) & 
-        (col("product_id").notin(customer_purchases.select("product_id")))
+        col("sku").notin(customer_recent_skus.select("sku"))
     ).select(
-        col("product_id"),
+        col("sku"),
         col("city_popularity_score"),
         col("city_buyers_count"),
-        lit(customer_id).alias("recommended_for_customer"),
-        lit(city_name).alias("city")
+        col("avg_score"),
+        lit(customer_id).alias("customer_id"),
+        lit(city_name).alias("city"),
+        lit("recommended").alias("recommendation_type")
     ).order_by(desc("city_popularity_score")).limit(20)
     
-    return city_top_products
+    return recommendations
 
-# 5. EXAMPLE USAGE - Replace with actual customer_id and city
-customer_id = "CUST12345"  # REPLACE WITH REAL CUSTOMER ID
-customer_city = "Delhi"    # REPLACE WITH REAL CITY
+# 6. TEST WITH REAL CUSTOMER (UPDATE THESE VALUES)
+TEST_CUSTOMER_ID = "CUST12345"  # ← YOUR CUSTOMER_EXTERNAL_CODE
+TEST_CITY = "Delhi"             # ← YOUR DEALER_CITY
 
-recommendations = get_customer_recommendations(customer_id, customer_city)
 print(f"
-=== TOP 20 RECOMMENDATIONS for Customer {customer_id} in {customer_city} ===")
-recommendations.select("product_id", "city_popularity_score", "city_buyers_count").show(20)
+🎯 RECOMMENDATIONS for {TEST_CUSTOMER_ID} in {TEST_CITY}")
+customer_recs = get_customer_recommendations(TEST_CUSTOMER_ID, TEST_CITY)
+customer_recs.show(20)
 
-# 6. BATCH RECOMMENDATIONS for ALL customers in a city
-def generate_city_batch_recommendations(city_name):
-    """Generate recommendations for ALL customers in a city"""
+# 7. BATCH ALL CUSTOMERS IN A CITY (OPTIONAL)
+def batch_city_recommendations(city_name):
+    """Recommendations for ALL customers in city"""
     city_customers = recent_orders.filter(col("city") == lit(city_name)).select("customer_id").distinct()
     
-    batch_recs = city_customers.cross_join(
-        city_popular_products.filter(col("city") == lit(city_name))
+    all_recs = city_customers.alias("c").cross_join(
+        city_popular_skus.filter(col("city") == lit(city_name)).alias("p")
     ).filter(
-        col("customer_id").notin(
+        col("c.customer_id").notin(
             recent_orders.filter(
                 (col("city") == lit(city_name)) & 
-                (col("product_id") == col("city_popular_products.product_id"))
+                (col("sku") == col("p.sku"))
             ).select("customer_id")
         )
-    ).group_by("customer_id", "product_id").agg(
+    ).select(
+        col("c.customer_id"),
+        col("p.sku"),
+        col("p.city_popularity_score"),
+        col("p.city_buyers_count")
+    ).group_by("customer_id", "sku").agg(
         max("city_popularity_score").alias("score")
-    ).order_by(col("customer_id"), desc("score")).limit(20 * city_customers.count())
+    ).with_column(
+        "rank", row_number().over(Window.partition_by("customer_id").order_by(desc("score")))
+    ).filter(col("rank") <= 20)
     
-    return batch_recs
+    return all_recs
 
-# Example batch for Delhi customers
-# delhi_batch = generate_city_batch_recommendations("Delhi")
-# delhi_batch.write.mode("overwrite").save_as_table("CUSTOMER_RECOMMENDATIONS_DELLI")
+# 8. SAVE RESULTS
+customer_recs.write.mode("overwrite").save_as_table(f"RECS_{TEST_CUSTOMER_ID.replace('/', '_').replace(' ', '_')}")
+print(f"✅ SAVED to table: RECS_{TEST_CUSTOMER_ID}")
 
-# 7. Save single customer recommendations
-recommendations.write.mode("overwrite").save_as_table(f"RECS_{customer_id.replace(' ', '_')}")
-print(f"Saved recommendations for {customer_id} to table: RECS_{customer_id}")
+# Uncomment for batch city recommendations
+# delhi_batch = batch_city_recommendations("Delhi")
+# delhi_batch.write.mode("overwrite").save_as_table("BATCH_RECS_DELLI")
 
-# Close session
+# 9. CLEANUP
 session.close()
-print("✅ COMPLETE: City-popular product recommendations generated!")
+print("🎉 PIPELINE COMPLETE - Ready for Talverge!")
