@@ -1,14 +1,20 @@
-
-# ✅ PURE SNOWPARK MATRIX FACTORIZATION ALS COLLABORATIVE FILTERING
-# NO PySpark, NO pandas - Custom UDFs | City-specific | Exclude 6mo purchases | Top 20 SKUs
+# PURE SNOWPARK STORED PROCEDURE + IMPLICIT LIBRARY
+# Configurable QUANTITY/VALUE | City CF | 6mo exclude | Top 20
 
 from snowflake.snowpark import Session
-from snowflake.snowpark.functions import *
-from snowflake.snowpark.types import FloatType, IntegerType, StringType, ArrayType
 from snowflake.snowpark.stored_procedure import StoredProcedureRegistration
+from snowflake.snowpark.types import StringType, StructType, StructField, FloatType
+import implicit  # pip install implicit
 import numpy as np
+import pandas as pd
+from typing import Dict, List
 
-# 1. SETUP SESSION (UPDATE YOUR CONNECTION)
+# 1. CONFIG
+RATING_TYPE = "QUANTITY"  # QUANTITY | VALUE | BOTH
+ALPHA = 40  # Implicit confidence scaling
+FACTORS = 20
+
+# 2. SNOWPARK SESSION
 connection_parameters = {
     "account": "<your_account>",
     "user": "<your_user>", 
@@ -19,157 +25,123 @@ connection_parameters = {
 }
 session = Session.builder.configs(connection_parameters).create()
 
-# 2. LOAD LAST 6 MONTHS DATA
-orders_df = session.table("your_orders_table")  # UPDATE TABLE NAME
-
-recent_orders = orders_df.select(
+# 3. PREPARE DATA (Snowpark → pandas for implicit)
+recent_orders = session.table("your_orders_table").select(
     col("CUSTOMER_EXTERNAL_CODE").alias("customer_id"),
     col("SKU_ERP_CODE").alias("sku"),
     col("DEALER_CITY").alias("city"),
     col("WEEK_START_DATE"),
-    (col("TOTAL_QUANTITY") * col("TOTAL_DLP_VALUE")).alias("rating")
-).filter(
-    (col("WEEK_START_DATE") >= (current_date() - 180)) &
-    (col("rating") > 0) &
-    col("customer_id").is_not_null() &
-    col("sku").is_not_null()
+    col("TOTAL_QUANTITY"),
+    col("TOTAL_DLP_VALUE")
+).filter(col("WEEK_START_DATE") >= (current_date() - 180))
+
+# Configurable rating
+if RATING_TYPE == "QUANTITY":
+    recent_orders = recent_orders.with_column("confidence", col("TOTAL_QUANTITY"))
+elif RATING_TYPE == "VALUE":
+    recent_orders = recent_orders.with_column("confidence", col("TOTAL_DLP_VALUE"))
+else:
+    recent_orders = recent_orders.with_column("confidence", col("TOTAL_QUANTITY") * col("TOTAL_DLP_VALUE"))
+
+data_pd = recent_orders.filter(col("confidence") > 0).to_pandas()
+print(f"Data loaded: {len(data_pd)} interactions | Rating: {RATING_TYPE}")
+
+# 4. STORED PROCEDURE WITH IMPLICIT ALS (runs on Snowflake!)
+def implicit_als_training(session: Session) -> str:
+    """Snowpark SP: Train implicit ALS per city"""
+    
+    # Group by city
+    cities = data_pd['city'].unique()
+    results = {}
+    
+    for city in cities:
+        city_data = data_pd[data_pd['city'] == city]
+        if len(city_data) < 1000:  # Skip small cities
+            continue
+            
+        # Create sparse matrix (customers × skus)
+        customers = city_data['customer_id'].astype('category').cat.codes
+        skus = city_data['sku'].astype('category').cat.codes
+        
+        # Implicit confidence matrix
+        sparse_matrix = implicit.coo_matrix((city_data['confidence'], (customers, skus)))
+        sparse_matrix = sparse_matrix.tocsr()
+        
+        # Train AlternatingLeastSquares
+        model = implicit.als.AlternatingLeastSquares(
+            factors=FACTORS,
+            alpha=ALPHA,
+            iterations=15,
+            regularization=0.01,
+            use_gpu=False  # Snowflake CPU warehouse
+        )
+        model.fit(sparse_matrix)
+        
+        # Store model (joblib)
+        import joblib
+        joblib.dump(model, f"/tmp/{city}_als_model.pkl")
+        results[city] = f"Trained {sparse_matrix.shape[0]} customers, {sparse_matrix.shape[1]} skus"
+    
+    return f"Trained {len(results)} cities: {results}"
+
+# Register & RUN Stored Procedure
+implicit_sp = StoredProcedureRegistration(
+    session, 
+    implicit_als_training,
+    packages=['implicit', 'pandas', 'numpy', 'joblib', 'snowflake-snowpark-python'],
+    return_type=StringType(),
+    input_types=[]
 )
 
-print(f"✅ Training data loaded: {recent_orders.count()} interactions (last 6 months)")
+print("🚀 Training Implicit ALS...")
+result = implicit_sp()
+print(result)
 
-# 3. PURE SNOWPARK ALS UDFs (Matrix Factorization)
-LATENT_FACTORS = 15
-LEARNING_RATE = 0.015
-
-# UDF: Initialize random embeddings (seeded for reproducibility)
-@udf(name="init_embedding", input_types=[StringType()], output_type=ArrayType(FloatType(), True), is_permanent=False)
-def init_embedding(key: str) -> List[float]:
-    np.random.seed(abs(hash(key)) % (2**31))
-    return [float(np.random.normal(0, 0.1)) for _ in range(LATENT_FACTORS)]
-
-# UDF: ALS SGD update step (user/item embeddings)
-@udf(name="als_update", 
-     input_types=[ArrayType(FloatType()), ArrayType(FloatType()), FloatType()], 
-     output_types=[ArrayType(FloatType()), ArrayType(FloatType())],
-     is_permanent=False)
-def als_update_step(user_emb: List[float], item_emb: List[float], rating: float) -> Tuple[List[float], List[float]]:
-    # Predict rating
-    pred_rating = sum(u * i for u, i in zip(user_emb, item_emb))
-    error = rating - pred_rating
+# 5. GENERATE RECOMMENDATIONS STORED PROCEDURE
+def generate_implicit_recs(session: Session, customer_id: str, city: str) -> str:
+    """Get top 20 recs for customer"""
+    import joblib
     
-    # SGD updates
-    new_user_emb = [u + LEARNING_RATE * error * i for u, i in zip(user_emb, item_emb)]
-    new_item_emb = [i + LEARNING_RATE * error * u for i, u in zip(item_emb, user_emb)]
+    model = joblib.load(f"/tmp/{city}_als_model.pkl")
     
-    return new_user_emb, new_item_emb
+    # Get customer/item indices
+    city_data = data_pd[data_pd['city'] == city]
+    customer_idx = city_data[city_data['customer_id'] == customer_id]['customer_id'].cat.codes.iloc[0]
+    
+    # Implicit ALS recommendations
+    recs = model.recommend(customer_idx, city_data['sku'].cat.codes, N=50)
+    
+    # Map back + exclude recent
+    recent_purchases = set(city_data[
+        (city_data['customer_id'] == customer_id)
+    ]['sku'].tolist())
+    
+    top_skus = []
+    for sku_idx, score in recs:
+        sku = city_data['sku'].cat.categories[sku_idx]
+        if sku not in recent_purchases:
+            top_skus.append((sku, float(score)))
+            if len(top_skus) == 20:
+                break
+    
+    # Save results
+    recs_df = pd.DataFrame(top_skus, columns=['sku', 'score'])
+    session.create_dataframe(recs_df).write.mode("overwrite") \
+        .save_as_table(f"IMPLICIT_ALS_RECS_{customer_id.replace(' ', '_')}")
+    
+    return f"Generated {len(top_skus)} recs for {customer_id}"
 
-# UDF: Predict rating from embeddings (dot product)
-@udf(name="predict_rating", input_types=[ArrayType(FloatType()), ArrayType(FloatType())], 
-     output_type=FloatType(), is_permanent=False)
-def predict_rating(user_emb: List[float], item_emb: List[float]) -> float:
-    return float(sum(u * i for u, i in zip(user_emb, item_emb)))
-
-# Register UDFs
-session.udf.register(init_embedding)
-session.udf.register(als_update_step)
-session.udf.register(predict_rating)
-
-# 4. TRAIN EMBEDDINGS (Snowpark distributed)
-print("🚀 Training ALS embeddings...")
-train_data = recent_orders.with_columns(
-    call_udf("init_embedding", col("customer_id")).alias("user_emb_raw"),
-    call_udf("init_embedding", col("sku")).alias("item_emb_raw")
+# Usage
+TEST_CUSTOMER = "CUST12345"
+TEST_CITY = "Delhi"
+rec_sp = StoredProcedureRegistration(
+    session, lambda s: generate_implicit_recs(s, TEST_CUSTOMER, TEST_CITY),
+    packages=['implicit', 'pandas', 'joblib']
 )
+print(rec_sp())
 
-# Single training pass (production: iterative stored proc)
-trained_embs = train_data.select(
-    "city", "customer_id", "sku", "rating",
-    call_udf("als_update_step", col("user_emb_raw"), col("item_emb_raw"), col("rating"))
-        .alias("trained_embs")
-).select(
-    "city", "customer_id", "sku", "rating",
-    col("trained_embs[0]").alias("final_user_emb"),
-    col("trained_embs[1]").alias("final_item_emb")
-)
+customer_recs = session.table(f"IMPLICIT_ALS_RECS_{TEST_CUSTOMER.replace(' ', '_')}")
+customer_recs.order_by(col("score").desc()).show(20)
 
-print(f"✅ Embeddings trained: {trained_embs.count()}")
-
-# 5. CUSTOMER & SKU EMBEDDINGS (aggregated)
-customer_embeddings = trained_embs.group_by("city", "customer_id").agg(
-    array_agg("final_user_emb").alias("user_embeddings")
-).with_column(
-    "user_embedding",
-    array_agg(col("user_embeddings")[0])  # Simplified avg embedding
-)
-
-sku_embeddings = trained_embs.group_by("city", "sku").agg(
-    array_agg("final_item_emb").alias("item_embeddings")
-).with_column(
-    "item_embedding",
-    array_agg(col("item_embeddings")[0])
-)
-
-# 6. GENERATE PREDICTIONS (user × item matrix)
-print("🔮 Generating predictions...")
-all_predictions = customer_embeddings.cross_join(
-    sku_embeddings.filter(col("city") == col("customer_embeddings.city"))
-).with_column(
-    "predicted_rating",
-    call_udf("predict_rating", col("user_embedding"), col("item_embedding"))
-).select(
-    col("customer_embeddings.customer_id").alias("customer_id"),
-    col("sku_embeddings.city").alias("city"),
-    col("sku_embeddings.sku").alias("sku"),
-    col("predicted_rating")
-).filter(col("predicted_rating").is_not_null())
-
-print(f"✅ Predictions complete: {all_predictions.count()}")
-
-# 7. TOP 20 RECOMMENDATION FUNCTION
-def get_als_recommendations(customer_id: str, city: str, top_k: int = 20):
-    """Get top K predicted SKUs not bought in last 6 months"""
-    
-    # Exclude customer's recent purchases
-    recent_purchases = recent_orders.filter(
-        (col("customer_id") == lit(customer_id)) &
-        (col("city") == lit(city))
-    ).select("sku").distinct()
-    
-    recs = all_predictions.filter(
-        (col("customer_id") == lit(customer_id)) &
-        (col("city") == lit(city)) &
-        col("sku").not_in(recent_purchases.select("sku")) &
-        (col("predicted_rating") > lit(1.0))  # Confidence threshold
-    ).order_by(col("predicted_rating").desc()).limit(top_k)
-    
-    return recs
-
-# 8. TEST IT
-TEST_CUSTOMER_ID = "CUST12345"  # UPDATE YOUR CUSTOMER_EXTERNAL_CODE
-TEST_CITY = "Delhi"             # UPDATE YOUR DEALER_CITY
-
-print(f"
-🎯 TOP 20 ALS RECOMMENDATIONS:")
-print(f"Customer: {TEST_CUSTOMER_ID} | City: {TEST_CITY}")
-
-customer_recs = get_als_recommendations(TEST_CUSTOMER_ID, TEST_CITY)
-customer_recs.show(20)
-
-# 9. SAVE RESULTS
-customer_recs.write.mode("overwrite").save_as_table(f"SNOWPARK_ALS_RECS_{TEST_CUSTOMER_ID.replace(' ', '_')}")
-print(f"✅ SAVED to table: SNOWPARK_ALS_RECS_{TEST_CUSTOMER_ID}")
-
-# 10. BATCH FOR ENTIRE CITY (all customers)
-city_batch_recs = all_predictions.filter(col("city") == TEST_CITY).with_column(
-    "rank", row_number().over(
-        Window.partition_by("customer_id").order_by(col("predicted_rating").desc())
-    )
-).filter(col("rank") <= 20)
-
-city_batch_recs.write.mode("overwrite").save_as_table("SNOWPARK_ALS_BATCH_RECS_DELLI")
-print("✅ CITY BATCH recommendations saved!")
-
-# CLEANUP
 session.close()
-print("🎉 PURE SNOWPARK ALS COLLABORATIVE FILTERING COMPLETE!")
-print("✅ 100% Snowflake-native | Scales to 6M rows | Ready for Talverge!")
+print("✅ IMPLICIT LIBRARY ALS COMPLETE!")
