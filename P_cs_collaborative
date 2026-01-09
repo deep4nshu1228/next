@@ -287,3 +287,163 @@ print("="*60)
 
 session.close()
 print("✅ Session closed - Ready for Talverge production!")
+
+
+
+
+
+
+
+
+
+#####################
+RECOMMENDATIONS
+######################
+
+# ✅ PREDICTION SCRIPT - Load Saved Implicit ALS Models
+# Usage: python predict_recommendations.py "CUST12345" "DELHI"
+
+import sys
+import pandas as pd
+import joblib
+import os
+import argparse
+from typing import Dict, Tuple, List
+
+# CONFIG
+MODEL_SAVE_PATH = "./city_models/"
+LATENT_FACTORS = 20
+
+def load_city_model(city: str) -> Tuple:
+    """Load model + mappings for a city"""
+    safe_city = city.upper().replace(' ', '_').replace('/', '_')
+    model_file = f"{MODEL_SAVE_PATH}{safe_city}_model.pkl"
+    mapping_file = f"{MODEL_SAVE_PATH}{safe_city}_mappings.pkl"
+    
+    if not os.path.exists(model_file):
+        print(f"❌ Model not found: {model_file}")
+        return None, None
+    
+    try:
+        model = joblib.load(model_file)
+        mappings = joblib.load(mapping_file)
+        print(f"✅ Loaded {city} model (factors={LATENT_FACTORS})")
+        return model, mappings
+    except Exception as e:
+        print(f"❌ Load error: {e}")
+        return None, None
+
+def get_recommendations(model, mappings: Dict, CUSTOMER_ID: str, CITY: str, top_k: int = 20) -> pd.DataFrame:
+    """Generate recommendations for single customer"""
+    
+    CUSTOMER_TO_IDX = mappings['CUSTOMER_TO_IDX']
+    SKU_MAP = mappings['SKU_MAP']
+    SPARSE_MATRIX = mappings['SPARSE_MATRIX']
+    
+    # Check customer exists
+    if CUSTOMER_ID not in CUSTOMER_TO_IDX:
+        print(f"❌ {CUSTOMER_ID} not in {CITY}")
+        print(f"   Sample customers: {list(CUSTOMER_TO_IDX.keys())[:5]}")
+        return pd.DataFrame()
+    
+    customer_idx = CUSTOMER_TO_IDX[CUSTOMER_ID]
+    
+    # Get top recommendations (excludes already bought items)
+    recs = model.recommend(
+        customer_idx, 
+        SPARSE_MATRIX[customer_idx],
+        N=top_k,
+        filter_already_liked_items=True
+    )
+    
+    # Convert indices to SKUs
+    recommendations = []
+    for sku_idx, score in zip(recs[0], recs[1]):
+        sku_code = SKU_MAP[sku_idx]
+        recommendations.append({
+            'CUSTOMER_ID': CUSTOMER_ID,
+            'CITY': CITY,
+            'SKU': sku_code,
+            'PREFERENCE_SCORE': float(score),
+            'RANK': len(recommendations) + 1
+        })
+    
+    df = pd.DataFrame(recommendations)
+    print(f"✅ Generated {len(df)} recommendations for {CUSTOMER_ID}")
+    return df
+
+def get_similar_items(model, mappings: Dict, SKU: str, CITY: str, top_k: int = 10) -> pd.DataFrame:
+    """Get similar SKUs (item-to-item recommendations)"""
+    
+    SKU_TO_IDX = mappings['SKU_TO_IDX']
+    SKU_MAP = mappings['SKU_MAP']
+    
+    if SKU not in SKU_TO_IDX:
+        print(f"❌ SKU {SKU} not in {CITY}")
+        return pd.DataFrame()
+    
+    sku_idx = SKU_TO_IDX[SKU]
+    
+    # Find similar items
+    similar = model.similar_items(sku_idx, N=top_k)
+    
+    recommendations = []
+    for sim_idx, score in zip(similar[0], similar[1]):
+        sim_sku = SKU_MAP[sim_idx]
+        recommendations.append({
+            'ORIGINAL_SKU': SKU,
+            'CITY': CITY,
+            'SIMILAR_SKU': sim_sku,
+            'SIMILARITY_SCORE': float(score),
+            'RANK': len(recommendations) + 1
+        })
+    
+    df = pd.DataFrame(recommendations)
+    print(f"✅ Found {len(df)} similar SKUs to {SKU}")
+    return df
+
+def main():
+    parser = argparse.ArgumentParser(description="Implicit ALS Recommendations")
+    parser.add_argument("customer_id", help="Customer ID (e.g. CUST12345)")
+    parser.add_argument("city", help="City (e.g. DELHI)")
+    parser.add_argument("--top_k", type=int, default=20, help="Number of recommendations")
+    parser.add_argument("--similar_sku", help="Get similar SKUs instead")
+    args = parser.parse_args()
+    
+    CUSTOMER_ID = args.customer_id.upper()
+    CITY = args.city.upper()
+    
+    print(f"\n🎯 Generating recommendations...")
+    print(f"CUSTOMER_ID: {CUSTOMER_ID}")
+    print(f"CITY: {CITY}")
+    
+    # Load model
+    model, mappings = load_city_model(CITY)
+    if not model:
+        return
+    
+    # Generate recommendations
+    if args.similar_sku:
+        SKU = args.similar_sku.upper()
+        recs_df = get_similar_items(model, mappings, SKU, CITY)
+    else:
+        recs_df = get_recommendations(model, mappings, CUSTOMER_ID, CITY, args.top_k)
+    
+    if not recs_df.empty:
+        print("\n📊 RECOMMENDATIONS:")
+        print("-" * 80)
+        print(recs_df.to_string(index=False))
+        print("-" * 80)
+        
+        # Save to CSV
+        output_file = f"recommendations_{CUSTOMER_ID}_{CITY}.csv"
+        recs_df.to_csv(output_file, index=False)
+        print(f"\n💾 Saved to: {output_file}")
+        
+        # Save to JSON for API
+        recs_df.to_json(f"recommendations_{CUSTOMER_ID}_{CITY}.json", orient='records', indent=2)
+        print(f"💾 Saved JSON: recommendations_{CUSTOMER_ID}_{CITY}.json")
+
+if __name__ == "__main__":
+    main()
+
