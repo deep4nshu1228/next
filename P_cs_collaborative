@@ -1,8 +1,8 @@
-# ✅ SIMPLE SNOWPARK + IMPLICIT ALS (PANDAS VERSION - NO STORED PROCEDURES)
+# ✅ FIXED: ALL ALIASES CAPITAL | SIMPLE SNOWPARK + IMPLICIT ALS (PANDAS VERSION)
 # Configurable QUANTITY/VALUE | City-wise models | Save models | Top 20 SKUs
 
 from snowflake.snowpark import Session
-from snowflake.snowpark.functions import col
+from snowflake.snowpark.functions import col, upper
 import pandas as pd
 import numpy as np
 import implicit
@@ -38,16 +38,16 @@ print("📥 Loading last 6 months orders...")
 orders_df = session.table("your_orders_table")  # UPDATE TABLE NAME
 
 recent_orders = orders_df.select(
-    col("CUSTOMER_EXTERNAL_CODE").alias("customer_id"),
-    col("SKU_ERP_CODE").alias("sku"),
-    col("DEALER_CITY").alias("city"),
+    upper(col("CUSTOMER_EXTERNAL_CODE")).alias("CUSTOMER_ID"),
+    upper(col("SKU_ERP_CODE")).alias("SKU"),
+    upper(col("DEALER_CITY")).alias("CITY"),
     col("WEEK_START_DATE"),
     col("TOTAL_QUANTITY"),
     col("TOTAL_DLP_VALUE")
 ).filter(
     (col("WEEK_START_DATE") >= (session.sql("SELECT CURRENT_DATE() - 180").collect()[0][0])) &
-    col("customer_id").is_not_null() &
-    col("sku").is_not_null()
+    col("CUSTOMER_ID").is_not_null() &
+    col("SKU").is_not_null()
 )
 
 # Convert to pandas (one-time load)
@@ -56,15 +56,21 @@ print(f"✅ Data loaded: {len(data_pd)} interactions")
 
 # ==================== 3. CONFIGURE RATING ====================
 if RATING_TYPE == "QUANTITY":
-    data_pd['confidence'] = data_pd['TOTAL_QUANTITY']
+    data_pd['CONFIDENCE'] = data_pd['TOTAL_QUANTITY']
 elif RATING_TYPE == "VALUE":
-    data_pd['confidence'] = data_pd['TOTAL_DLP_VALUE']
+    data_pd['CONFIDENCE'] = data_pd['TOTAL_DLP_VALUE']
 else:  # BOTH
-    data_pd['confidence'] = data_pd['TOTAL_QUANTITY'] * data_pd['TOTAL_DLP_VALUE'] / 1000.0
+    data_pd['CONFIDENCE'] = data_pd['TOTAL_QUANTITY'] * data_pd['TOTAL_DLP_VALUE'] / 1000.0
 
 # Filter positive confidence
-data_pd = data_pd[data_pd['confidence'] > 0].reset_index(drop=True)
+data_pd = data_pd[data_pd['CONFIDENCE'] > 0].reset_index(drop=True)
+
+# ✅ ENSURE CITY IS UPPERCASE IN PANDAS TOO
+data_pd['CITY'] = data_pd['CITY'].str.upper()
+
 print(f"✅ Rating type: {RATING_TYPE} | {len(data_pd)} valid interactions")
+print(f"✅ Cities found: {data_pd['CITY'].nunique()}")
+print(f"✅ Sample cities: {data_pd['CITY'].value_counts().head().to_dict()}")
 
 # ==================== 4. TRAIN IMPLICIT ALS CITY-WISE ====================
 print("\n🚀 Training Implicit ALS per city...")
@@ -72,19 +78,19 @@ print("\n🚀 Training Implicit ALS per city...")
 city_models = {}
 city_mappings = {}
 
-cities = data_pd['city'].value_counts()
+cities = data_pd['CITY'].value_counts()
 cities = cities[cities >= 500].index.tolist()  # Min 500 interactions per city
 
 for city in cities:
     print(f"\n📍 Training: {city}")
-    city_data = data_pd[data_pd['city'] == city].copy()
+    city_data = data_pd[data_pd['CITY'] == city].copy()
     
     # Create ID mappings
-    city_data['customer_idx'] = city_data['customer_id'].astype('category').cat.codes
-    city_data['sku_idx'] = city_data['sku'].astype('category').cat.codes
+    city_data['CUSTOMER_IDX'] = city_data['CUSTOMER_ID'].astype('category').cat.codes
+    city_data['SKU_IDX'] = city_data['SKU'].astype('category').cat.codes
     
-    customer_map = dict(enumerate(city_data['customer_id'].astype('category').cat.categories))
-    sku_map = dict(enumerate(city_data['sku'].astype('category').cat.categories))
+    customer_map = dict(enumerate(city_data['CUSTOMER_ID'].astype('category').cat.categories))
+    sku_map = dict(enumerate(city_data['SKU'].astype('category').cat.categories))
     
     # Reverse mappings
     customer_to_idx = {v: k for k, v in customer_map.items()}
@@ -92,8 +98,8 @@ for city in cities:
     
     # Create sparse matrix (users × items)
     sparse_matrix = coo_matrix(
-        (city_data['confidence'].values, 
-         (city_data['customer_idx'].values, city_data['sku_idx'].values))
+        (city_data['CONFIDENCE'].values, 
+         (city_data['CUSTOMER_IDX'].values, city_data['SKU_IDX'].values))
     ).tocsr()
     
     print(f"   Matrix: {sparse_matrix.shape[0]} users × {sparse_matrix.shape[1]} SKUs")
@@ -113,16 +119,17 @@ for city in cities:
     # Save model and mappings
     city_models[city] = model
     city_mappings[city] = {
-        'customer_map': customer_map,
-        'sku_map': sku_map,
-        'customer_to_idx': customer_to_idx,
-        'sku_to_idx': sku_to_idx,
-        'sparse_matrix': sparse_matrix
+        'CUSTOMER_MAP': customer_map,
+        'SKU_MAP': sku_map,
+        'CUSTOMER_TO_IDX': customer_to_idx,
+        'SKU_TO_IDX': sku_to_idx,
+        'SPARSE_MATRIX': sparse_matrix
     }
     
-    # Save to disk
-    model_file = os.path.join(MODEL_SAVE_PATH, f"{city.replace(' ', '_')}_model.pkl")
-    mapping_file = os.path.join(MODEL_SAVE_PATH, f"{city.replace(' ', '_')}_mappings.pkl")
+    # Save to disk (safe filename)
+    safe_city_name = city.replace(' ', '_').replace('/', '_')
+    model_file = os.path.join(MODEL_SAVE_PATH, f"{safe_city_name}_model.pkl")
+    mapping_file = os.path.join(MODEL_SAVE_PATH, f"{safe_city_name}_mappings.pkl")
     
     joblib.dump(model, model_file)
     joblib.dump(city_mappings[city], mapping_file)
@@ -133,27 +140,33 @@ for city in cities:
 print(f"\n✅ Trained {len(city_models)} city models")
 
 # ==================== 5. RECOMMENDATION FUNCTION ====================
-def get_recommendations(customer_id, city, top_k=20, exclude_recent=True):
+def get_recommendations(CUSTOMER_ID, CITY, top_k=20, exclude_recent=True):
     """Get top K recommendations for customer"""
     
-    if city not in city_models:
-        print(f"❌ No model for city: {city}")
+    # ✅ NORMALIZE CITY INPUT TO UPPERCASE
+    CITY = CITY.upper()
+    
+    if CITY not in city_models:
+        available_cities = list(city_models.keys())
+        print(f"❌ No model for city: '{CITY}'")
+        print(f"   Available cities: {available_cities[:5]}")
         return pd.DataFrame()
     
-    model = city_models[city]
-    mappings = city_mappings[city]
+    model = city_models[CITY]
+    mappings = city_mappings[CITY]
     
     # Check if customer exists
-    if customer_id not in mappings['customer_to_idx']:
-        print(f"❌ Customer {customer_id} not found in {city}")
+    if CUSTOMER_ID not in mappings['CUSTOMER_TO_IDX']:
+        print(f"❌ Customer {CUSTOMER_ID} not found in {CITY}")
+        print(f"   Sample customers: {list(mappings['CUSTOMER_TO_IDX'].keys())[:5]}")
         return pd.DataFrame()
     
-    customer_idx = mappings['customer_to_idx'][customer_id]
+    customer_idx = mappings['CUSTOMER_TO_IDX'][CUSTOMER_ID]
     
     # Get recommendations (returns indices + scores)
     recs = model.recommend(
         customer_idx, 
-        mappings['sparse_matrix'][customer_idx],
+        mappings['SPARSE_MATRIX'][customer_idx],
         N=top_k * 2,  # Get extra for filtering
         filter_already_liked_items=exclude_recent
     )
@@ -161,57 +174,70 @@ def get_recommendations(customer_id, city, top_k=20, exclude_recent=True):
     # Map back to SKU codes
     recommendations = []
     for sku_idx, score in zip(recs[0], recs[1]):
-        sku_code = mappings['sku_map'][sku_idx]
+        sku_code = mappings['SKU_MAP'][sku_idx]
         recommendations.append({
-            'customer_id': customer_id,
-            'city': city,
-            'sku': sku_code,
-            'preference_score': float(score)
+            'CUSTOMER_ID': CUSTOMER_ID,
+            'CITY': CITY,
+            'SKU': sku_code,
+            'PREFERENCE_SCORE': float(score)
         })
     
     return pd.DataFrame(recommendations[:top_k])
 
 # ==================== 6. TEST RECOMMENDATIONS ====================
-TEST_CUSTOMER = "CUST12345"  # UPDATE WITH REAL CUSTOMER_EXTERNAL_CODE
-TEST_CITY = "Delhi"          # UPDATE WITH REAL DEALER_CITY
+TEST_CUSTOMER_ID = "CUST12345"  # UPDATE WITH REAL CUSTOMER_EXTERNAL_CODE
+TEST_CITY = "DELHI"             # UPDATE WITH REAL DEALER_CITY (UPPERCASE)
 
 print(f"\n🎯 TOP 20 RECOMMENDATIONS:")
-print(f"Customer: {TEST_CUSTOMER} | City: {TEST_CITY} | Rating: {RATING_TYPE}")
+print(f"CUSTOMER_ID: {TEST_CUSTOMER_ID} | CITY: {TEST_CITY} | Rating: {RATING_TYPE}")
+
+# ✅ DEBUG: Show available cities first
+print(f"\n📍 Available cities in models: {list(city_models.keys())}")
 
 try:
-    recs_df = get_recommendations(TEST_CUSTOMER, TEST_CITY, top_k=20)
-    print(recs_df)
+    recs_df = get_recommendations(TEST_CUSTOMER_ID, TEST_CITY, top_k=20)
     
-    # Save back to Snowflake
     if not recs_df.empty:
+        print(recs_df)
+        
+        # Save back to Snowflake
         snow_recs = session.create_dataframe(recs_df)
-        snow_recs.write.mode("overwrite").save_as_table(f"RECS_{TEST_CUSTOMER.replace(' ', '_').replace('/', '_')}")
-        print(f"\n✅ Saved to Snowflake: RECS_{TEST_CUSTOMER}")
+        safe_customer_name = TEST_CUSTOMER_ID.replace(' ', '_').replace('/', '_')
+        snow_recs.write.mode("overwrite").save_as_table(f"RECS_{safe_customer_name}")
+        print(f"\n✅ Saved to Snowflake: RECS_{safe_customer_name}")
+    else:
+        print("⚠️ No recommendations generated")
+        
 except Exception as e:
     print(f"❌ Error: {e}")
+    import traceback
+    traceback.print_exc()
 
 # ==================== 7. BATCH RECOMMENDATIONS (ALL CUSTOMERS IN CITY) ====================
-def generate_city_batch_recommendations(city, top_k=20):
+def generate_city_batch_recommendations(CITY, top_k=20):
     """Generate recommendations for ALL customers in a city"""
     
-    if city not in city_models:
-        print(f"❌ No model for {city}")
+    # ✅ NORMALIZE CITY
+    CITY = CITY.upper()
+    
+    if CITY not in city_models:
+        print(f"❌ No model for {CITY}")
         return pd.DataFrame()
     
-    model = city_models[city]
-    mappings = city_mappings[city]
+    model = city_models[CITY]
+    mappings = city_mappings[CITY]
     
     all_recs = []
-    customers = list(mappings['customer_map'].values())
+    customers = list(mappings['CUSTOMER_MAP'].values())
     
-    print(f"📦 Generating batch for {len(customers)} customers in {city}...")
+    print(f"📦 Generating batch for {len(customers)} customers in {CITY}...")
     
     for i, customer_id in enumerate(customers):
         if i % 100 == 0:
             print(f"   Progress: {i}/{len(customers)}")
         
         try:
-            recs = get_recommendations(customer_id, city, top_k=top_k)
+            recs = get_recommendations(customer_id, CITY, top_k=top_k)
             all_recs.append(recs)
         except:
             continue
@@ -223,29 +249,29 @@ print(f"\n📦 Generating batch recommendations for {TEST_CITY}...")
 city_batch = generate_city_batch_recommendations(TEST_CITY, top_k=20)
 
 if not city_batch.empty:
-    print(f"✅ Generated {len(city_batch)} recommendations for {city_batch['customer_id'].nunique()} customers")
+    print(f"✅ Generated {len(city_batch)} recommendations for {city_batch['CUSTOMER_ID'].nunique()} customers")
     
     # Save to Snowflake
     snow_batch = session.create_dataframe(city_batch)
-    snow_batch.write.mode("overwrite").save_as_table(f"BATCH_RECS_{TEST_CITY.replace(' ', '_')}")
-    print(f"✅ Saved to Snowflake: BATCH_RECS_{TEST_CITY}")
+    safe_city_name = TEST_CITY.replace(' ', '_').replace('/', '_')
+    snow_batch.write.mode("overwrite").save_as_table(f"BATCH_RECS_{safe_city_name}")
+    print(f"✅ Saved to Snowflake: BATCH_RECS_{safe_city_name}")
 
 # ==================== 8. LOAD MODEL FROM DISK (FOR PRODUCTION) ====================
-def load_city_model(city):
+def load_city_model(CITY):
     """Load saved model from disk"""
-    model_file = os.path.join(MODEL_SAVE_PATH, f"{city.replace(' ', '_')}_model.pkl")
-    mapping_file = os.path.join(MODEL_SAVE_PATH, f"{city.replace(' ', '_')}_mappings.pkl")
+    # ✅ NORMALIZE CITY
+    safe_city_name = CITY.upper().replace(' ', '_').replace('/', '_')
+    model_file = os.path.join(MODEL_SAVE_PATH, f"{safe_city_name}_model.pkl")
+    mapping_file = os.path.join(MODEL_SAVE_PATH, f"{safe_city_name}_mappings.pkl")
     
     if not os.path.exists(model_file):
         print(f"❌ Model not found: {model_file}")
         return None, None
     
-    model = joblib.load(model_file)
+    model = joblib.dump(model_file)
     mappings = joblib.load(mapping_file)
     return model, mappings
-
-# Example: Load model later
-# loaded_model, loaded_mappings = load_city_model("Delhi")
 
 # ==================== 9. SUMMARY ====================
 print("\n" + "="*60)
@@ -254,6 +280,7 @@ print("="*60)
 print(f"✅ Rating Type: {RATING_TYPE}")
 print(f"✅ Latent Factors: {LATENT_FACTORS}")
 print(f"✅ Cities Trained: {len(city_models)}")
+print(f"✅ City Names: {list(city_models.keys())[:10]}")
 print(f"✅ Models Saved: {MODEL_SAVE_PATH}")
 print(f"✅ Total Data: {len(data_pd):,} interactions")
 print("="*60)
